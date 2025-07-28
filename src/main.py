@@ -392,7 +392,8 @@ class QuantumSentimentBot:
             return
         
         self.is_running = True
-        logger.info("Starting main trading loop", mode=self.mode)
+        logger.info(f"🚀 STARTING MAIN TRADING LOOP - Mode: {self.mode}")
+        logger.info(f"🏪 Market is open: {self.broker.is_market_open()}")
         
         try:
             while self.is_running:
@@ -425,8 +426,12 @@ class QuantumSentimentBot:
     async def _trading_cycle(self) -> None:
         """Execute one trading cycle"""
         
+        cycle_start_time = datetime.now()
+        logger.info(f"🔄 TRADING CYCLE START - {cycle_start_time.strftime('%H:%M:%S')}")
+        
         try:
             # 1. Update market data
+            logger.info("📊 Updating market data...")
             await self._update_market_data()
             
             # 2. Generate predictions (every 5 minutes)
@@ -436,20 +441,31 @@ class QuantumSentimentBot:
                 
                 await self._generate_predictions()
                 self.last_prediction_time = now
+            else:
+                logger.info("⏭️ Skipping predictions (generated within last 5 minutes)")
             
             # 3. Check risk limits
+            logger.info("⚠️ Checking risk limits...")
             if not await self._check_risk_limits():
-                logger.warning("Risk limits exceeded, skipping trading")
+                logger.warning("🛑 Risk limits exceeded, skipping trading")
                 return
             
             # 4. Execute pending signals
             await self._execute_signals()
             
             # 5. Monitor positions
+            logger.info("👀 Monitoring positions...")
             await self._monitor_positions()
             
             # 6. Update performance metrics
+            logger.info("📊 Updating performance metrics...")
             await self._update_metrics()
+            
+            # Cycle summary
+            cycle_duration = (datetime.now() - cycle_start_time).total_seconds()
+            positions = self.position_tracker.get_all_positions()
+            active_positions = [p for p in positions if not p.is_flat]
+            logger.info(f"✅ CYCLE COMPLETE ({cycle_duration:.1f}s) - {len(active_positions)} active positions")
             
         except Exception as e:
             logger.error("Error in trading cycle", error=str(e))
@@ -473,13 +489,19 @@ class QuantumSentimentBot:
     async def _generate_predictions(self) -> None:
         """Generate trading signals using the ensemble model"""
         
-        logger.info("Generating predictions...")
+        logger.info("🧠 GENERATING PREDICTIONS...")
         
         # Get universe of stocks to analyze
         universe = await self._get_trading_universe()
+        logger.info(f"📋 Analyzing {len(universe)} symbols: {universe}")
+        
+        predictions_made = 0
+        signals_generated = 0
         
         for symbol in universe:
             try:
+                logger.info(f"🔍 Analyzing {symbol}...")
+                
                 # 1. Get market data
                 bars = await self.broker.get_bars(
                     symbol,
@@ -488,7 +510,10 @@ class QuantumSentimentBot:
                 )
                 
                 if bars.empty:
+                    logger.warning(f"⚠️ No market data for {symbol}")
                     continue
+                
+                logger.info(f"📊 Got {len(bars)} bars for {symbol}, latest price: ${bars.iloc[-1]['close']:.2f}")
                 
                 # 2. Get sentiment data
                 sentiment_dict = await self.sentiment_analyzer.get_aggregated_sentiment([symbol])
@@ -554,6 +579,9 @@ class QuantumSentimentBot:
                 
                 signal_strength = prediction.get('signal_strength', 0)
                 confidence = prediction.get('confidence', 0)
+                predictions_made += 1
+                
+                logger.info(f"🎯 PREDICTION for {symbol}: strength={signal_strength:.3f}, confidence={confidence:.3f}")
                 
                 # 5. Create trading signal with enhanced data
                 signal = {
@@ -568,24 +596,30 @@ class QuantumSentimentBot:
                 }
                 
                 # Validate signal using strategy-specific rules
-                if await self._validate_signal_by_strategy(signal):
+                is_valid = await self._validate_signal_by_strategy(signal)
+                if is_valid:
                     self.pending_signals.append(signal)
-                    logger.info("Signal generated",
-                               symbol=symbol,
-                               signal=signal['signal'],
-                               strength=signal['strength'],
-                               strategy_mode=self.config.trading.strategy_mode)
+                    signals_generated += 1
+                    logger.info(f"✅ SIGNAL GENERATED: {signal['signal'].upper()} {symbol} (strength: {signal['strength']:.3f})")
+                else:
+                    logger.info(f"❌ Signal validation failed for {symbol} (strength: {abs(signal_strength):.3f})")
                 
             except Exception as e:
                 logger.error("Failed to generate prediction",
                            symbol=symbol,
                            error=str(e))
+        
+        # Summary of prediction generation
+        logger.info(f"📊 PREDICTION SUMMARY: {predictions_made} predictions made, {signals_generated} signals generated, {len(self.pending_signals)} total pending")
     
     async def _execute_signals(self) -> None:
         """Execute pending trading signals"""
         
         if not self.pending_signals:
+            logger.info("📈 No pending signals to execute")
             return
+        
+        logger.info(f"💼 EXECUTING SIGNALS: {len(self.pending_signals)} pending signals")
         
         # Sort by strength
         self.pending_signals.sort(key=lambda x: x['strength'], reverse=True)

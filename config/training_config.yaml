@@ -1,0 +1,105 @@
+# Training Configuration for QuantumSentiment Trading Bot
+
+# Data Configuration
+data:
+  train_start_date: "2022-01-01"
+  train_end_date: "2024-12-31"
+  validation_split: 0.2
+  test_split: 0.1
+  symbols:
+    - "AAPL"
+    - "TSLA"
+    - "GOOGL"
+    - "MSFT"
+    - "SPY"
+    - "QQQ"
+    - "BTC-USD"
+    - "ETH-USD"
+
+# Model Configuration
+models:
+  # Which models to train
+  train_lstm: true
+  train_cnn: false  # Requires more setup for chart generation
+  train_xgboost: true
+  train_finbert: false  # Requires heavy compute and text data
+  train_ensemble: true
+
+  # Training parameters
+  parallel_training: true
+  max_workers: 4
+  use_gpu: false  # Set to true if you have CUDA setup
+  random_seed: 42
+
+# Model-specific configurations
+lstm:
+  sequence_length: 60
+  hidden_size: 128
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+  early_stopping_patience: 10
+
+cnn:
+  chart_height: 64
+  chart_width: 128
+  epochs: 30
+  batch_size: 32
+  learning_rate: 0.001
+
+xgboost:
+  n_estimators: 1000
+  max_depth: 6
+  learning_rate: 0.1
+  early_stopping_rounds: 50
+
+finbert:
+  epochs: 3
+  batch_size: 16
+  learning_rate: 2e-5
+
+ensemble:
+  meta_learner_type: "xgboost"
+  use_probabilities: true
+  cv_folds: 5
+
+# Output Configuration
+output:
+  model_save_dir: "models"
+  model_registry_path: "model_registry"
+  checkpoint_interval: 10
+  save_best_only: true
+
+# Performance Thresholds
+performance:
+  min_accuracy: 0.55
+  min_sharpe_ratio: 1.0
+  max_drawdown: 0.2
+
+# Monitoring
+monitoring:
+  track_metrics:
+    - "accuracy"
+    - "precision" 
+    - "recall"
+    - "f1"
+    - "sharpe_ratio"
+    - "max_drawdown"
+
+# Early Stopping
+early_stopping:
+  enabled: true
+  patience: 20
+  metric: "validation_f1"
+
+# Model Persistence
+persistence:
+  use_model_registry: true
+  auto_cleanup: true
+  max_versions_per_model: 5
+  backup_models: true
+
+# Database
+database:
+  url: "sqlite:///quantum_sentiment.db"
+  echo: false
