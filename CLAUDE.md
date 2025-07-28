@@ -1,46 +1,21 @@
-# CLAUDE.md - Essential Memory
+# QuantumSentiment - Core Directives & Project Context
 
-## Project: QuantumSentiment AI Trading System
-**Budget**: €1,000 | **Mode**: Paper first, then live | **Broker**: Alpaca
-MAIN RULE TO ALWAYS FOLLOW: NEVER SETTLE UNTIL EVERYTHING WORKS FLAWLESSLY. THIS NEEDS TO WORK IN REAL HIGH STAKES TRADING ENVIRONMENT. NO MINOR ISSUES. NO DEPENDENCY PROBLEM. EVERYTHING NEEDS TO WORK PERFECTLY. WHENEVER YOU SEE AN ERROR ADD IT TO YOUR CURRENT TODO.
+## Project Snapshot
+- **Project:** QuantumSentiment AI Trading System
+- **Objective:** Build a fully functional, production-ready trading bot.
+- **Broker:** Alpaca
+- **Current Mode:** Paper Trading (Live trading is a future goal)
+- **Budget Constraint:** Designed for a small capital base (€1,000)
 
-## Architecture Evolution
-1. **Phase 1-5**: Direct APIs → ML → Risk → Execution
-2. **Phase 6**: + LLM intelligence layer
-3. **Phase 7**: MCP + LLM architecture
+## Prime Directive
+Your prime directive is to execute the mandatory refactoring plan detailed in **`TODO.md`**. This document contains the full system analysis, identifies all critical flaws, and provides the step-by-step mandate for making the system functional. 
 
-## Critical Safety
-- Default: Paper trading only
-- Live requires: CONFIRM_REAL_MONEY_TRADING=true
-- Max: €50/position, €100/day loss, 20% drawdown
+## Critical Safety Rules
+1.  **Paper Trading First:** All development and testing must target paper trading mode.
+2.  **No Hardcoded Keys:** All secrets must be loaded from `.env`.
+3.  **Risk Management is Paramount:** Ensure all risk controls (drawdown, stop-loss, position limits) are functional and cannot be bypassed.
 
-## Modularity Rules
-- `src/` for core modules (data, models, risk, execution)
-- Each component: single responsibility, clear interfaces
-- No monolithic files - break into logical modules
-- Type hints everywhere, comprehensive logging
-
-## Key Reminders
-- **Always** update TODO.md as you implement features and note changes in NOTES.md 
-- **Always** reference README.md for complete requirements
-- **Always** download packages with source .venv/bin/activate
-- Start with direct APIs, add LLM layer later, then MCP
-- Paper trading must work perfectly before live trading
-- Risk management is more important than returns
-
-## Dependencies
-- **APIs**: alpaca-trade-api, praw, tweepy, alpha-vantage
-- **ML**: torch, transformers, xgboost, scikit-learn  
-- **Risk**: quantlib, scipy, pandas
-- **Data**: postgresql, redis, sqlalchemy
-
-## System Launch Checklist
-- [ ] Check if the whole pipeline is working together correctly
-- [ ] Draft detailed guide showing pipeline integration and module correlations
-- [ ] Build extensive guide on system startup and usage
-- [ ] Ensure system initializes and runs automatically
-- [ ] Implement two trading modes:
-  1. Full auto-trading
-  2. Trade proposals for user approval
-- [ ] Set up real-time trade monitoring and tracking
-- **🎯 MILESTONE**: System capable of starting trading
+## Guiding Principles
+- **Follow the Plan:** Execute the refactoring detailed in `TODO.md`.
+- **Update `NOTES.md`:** After completing a significant task, log the changes, decisions, and rationale in `NOTES.md` in the required academic style.
+- **Maintain Quality:** Adhere to the modular architecture. Write clean, documented code with full type hinting.

@@ -250,13 +250,29 @@ class BaseModel(ABC):
         
         # Save config
         config_path = path.with_suffix('.json')
+        
+        # Create a JSON encoder that handles numpy types
+        class NumpyEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif hasattr(obj, 'item'):  # numpy scalar
+                    return obj.item()
+                elif hasattr(obj, 'dtype'):  # other numpy types
+                    return obj.tolist() if hasattr(obj, 'tolist') else float(obj)
+                return super().default(obj)
+        
         with open(config_path, 'w') as f:
             json.dump({
                 'config': self.config.to_dict(),
                 'metadata': self.metadata,
                 'feature_importance': self.feature_importance,
                 'training_history': self.training_history
-            }, f, indent=2)
+            }, f, indent=2, cls=NumpyEncoder)
         
         logger.info("Model saved",
                    model_path=str(model_path),

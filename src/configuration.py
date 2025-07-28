@@ -269,6 +269,11 @@ class Config:
     def universe(self) -> ConfigSection:
         """Universe configuration section"""
         return self._sections.get('universe', ConfigSection({}))
+    
+    @property
+    def backtest(self) -> ConfigSection:
+        """Backtesting configuration section"""
+        return self._sections.get('backtest', ConfigSection({}))
 
 
 def load_config(config_path: Optional[str] = None) -> Config:

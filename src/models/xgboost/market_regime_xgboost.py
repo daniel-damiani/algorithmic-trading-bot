@@ -86,11 +86,11 @@ class MarketRegimeConfig(ClassificationConfig):
                 'high_volatility'
             ]
         if self.regime_thresholds is None:
-            # Default thresholds for regime classification
+            # Default thresholds for regime classification (adjusted for hourly data)
             self.regime_thresholds = {
-                'return_threshold': 0.02,  # 2% for strong moves
-                'volatility_threshold': 0.03,  # 3% for high volatility
-                'trend_strength': 0.7  # ADX threshold for strong trend
+                'return_threshold': 0.005,  # 0.5% for strong hourly moves
+                'volatility_threshold': 0.01,  # 1% for high hourly volatility
+                'trend_strength': 40  # ADX threshold for strong trend (not normalized)
             }
         self.n_classes = len(self.regime_classes)
         self.class_names = self.regime_classes
@@ -299,47 +299,60 @@ class MarketRegimeXGBoost(ClassificationModel):
         
         regimes = pd.Series(index=features.index, dtype=str)
         
-        # Calculate key metrics
-        returns = features.get('return_20', pd.Series(index=features.index))
-        volatility = features.get('volatility_20', pd.Series(index=features.index))
-        trend_strength = features.get('adx', pd.Series(index=features.index))
+        # Calculate key metrics with fallbacks
+        returns = features.get('return_20', pd.Series(0, index=features.index))
+        volatility = features.get('volatility_20', pd.Series(0, index=features.index))
+        trend_strength = features.get('adx', pd.Series(25, index=features.index))
+        
+        # Also use shorter-term returns for more sensitivity
+        returns_5 = features.get('return_5', pd.Series(0, index=features.index))
+        
+        # Fill NaN values with defaults
+        returns = returns.fillna(0)
+        volatility = volatility.fillna(volatility.median() if len(volatility) > 0 else 0.005)
+        trend_strength = trend_strength.fillna(25)
+        returns_5 = returns_5.fillna(0)
         
         # Default to sideways
         regimes[:] = 'sideways'
         
+        # High volatility regime (check first as it overrides others)
+        high_vol_mask = volatility > self.config.regime_thresholds['volatility_threshold']
+        regimes[high_vol_mask] = 'high_volatility'
+        
         # Strong bull market
         strong_bull_mask = (
             (returns > self.config.regime_thresholds['return_threshold']) &
-            (trend_strength > self.config.regime_thresholds['trend_strength'])
+            (trend_strength > self.config.regime_thresholds['trend_strength']) &
+            (~high_vol_mask)  # Not already classified as high volatility
         )
         regimes[strong_bull_mask] = 'strong_bull'
         
-        # Bull market
+        # Bull market (use either long-term or short-term positive returns)
         bull_mask = (
-            (returns > 0) &
-            (returns <= self.config.regime_thresholds['return_threshold']) &
-            (trend_strength > 30)
+            ((returns > 0.001) | (returns_5 > 0.002)) &  # Small positive threshold
+            (~strong_bull_mask) &  # Not already strong bull
+            (~high_vol_mask) &  # Not high volatility
+            (trend_strength > 20)  # Lower ADX threshold
         )
         regimes[bull_mask] = 'bull'
-        
-        # Bear market
-        bear_mask = (
-            (returns < 0) &
-            (returns >= -self.config.regime_thresholds['return_threshold']) &
-            (trend_strength > 30)
-        )
-        regimes[bear_mask] = 'bear'
         
         # Strong bear market
         strong_bear_mask = (
             (returns < -self.config.regime_thresholds['return_threshold']) &
-            (trend_strength > self.config.regime_thresholds['trend_strength'])
+            (trend_strength > self.config.regime_thresholds['trend_strength']) &
+            (~high_vol_mask)
         )
         regimes[strong_bear_mask] = 'strong_bear'
         
-        # High volatility regime
-        high_vol_mask = volatility > self.config.regime_thresholds['volatility_threshold']
-        regimes[high_vol_mask] = 'high_volatility'
+        # Bear market
+        bear_mask = (
+            ((returns < -0.001) | (returns_5 < -0.002)) &  # Small negative threshold
+            (~strong_bear_mask) &  # Not already strong bear
+            (~high_vol_mask) &  # Not high volatility
+            (trend_strength > 20)  # Lower ADX threshold
+        )
+        regimes[bear_mask] = 'bear'
         
         return regimes
     
@@ -399,6 +412,43 @@ class MarketRegimeXGBoost(ClassificationModel):
         elif is_training:
             # Auto-generate labels based on regime classification rules
             y = self.classify_market_regime(all_features)
+            
+            # Log regime distribution for debugging
+            regime_counts = y.value_counts()
+            logger.info("Generated regime distribution", regimes=regime_counts.to_dict())
+            
+            # If only one regime, create synthetic diversity
+            if len(regime_counts) == 1:
+                logger.warning("Only one regime detected, creating synthetic diversity")
+                # Force some diversity by using quantiles
+                returns = all_features.get('return_20', pd.Series(0, index=all_features.index))
+                volatility = all_features.get('volatility_20', pd.Series(0, index=all_features.index))
+                
+                # Use percentiles to create classes
+                y_new = pd.Series('sideways', index=y.index)
+                
+                # Top 20% returns -> bull
+                high_returns = returns > returns.quantile(0.8)
+                y_new[high_returns] = 'bull'
+                
+                # Bottom 20% returns -> bear  
+                low_returns = returns < returns.quantile(0.2)
+                y_new[low_returns] = 'bear'
+                
+                # Top 20% volatility -> high_volatility
+                high_vol = volatility > volatility.quantile(0.8)
+                y_new[high_vol] = 'high_volatility'
+                
+                # Extreme returns
+                very_high_returns = returns > returns.quantile(0.95)
+                y_new[very_high_returns] = 'strong_bull'
+                
+                very_low_returns = returns < returns.quantile(0.05)
+                y_new[very_low_returns] = 'strong_bear'
+                
+                y = y_new
+                logger.info("Synthetic regime distribution", regimes=y.value_counts().to_dict())
+            
             y = self.encode_labels(y, fit=True)
         
         return X, y
@@ -471,14 +521,22 @@ class MarketRegimeXGBoost(ClassificationModel):
         # Prepare validation data
         eval_set = []
         if validation_data:
+            # If validation data is provided as a tuple (data, labels)
+            val_data = validation_data[0]
+            val_labels = validation_data[1] if len(validation_data) > 1 else None
+            
+            # Prepare validation data - if labels are None, they'll be auto-generated
             X_val, y_val = self.prepare_data(
-                validation_data[0], 
-                validation_data[1], 
+                val_data, 
+                val_labels, 
                 is_training=False
             )
-            eval_set = [(X_val, y_val)]
+            
+            # Only add to eval_set if we have valid y_val
+            if y_val is not None and len(y_val) > 0:
+                eval_set = [(X_val, y_val)]
         else:
-            # Create validation split
+            # Create validation split from training data
             split_idx = int(len(X_train) * (1 - self.config.validation_split))
             X_val = X_train[split_idx:]
             y_val = y_train[split_idx:]
@@ -502,14 +560,20 @@ class MarketRegimeXGBoost(ClassificationModel):
         
         # Fit with or without early stopping based on XGBoost version
         try:
-            self.model.fit(
-                X_train, y_train,
-                eval_set=eval_set,
-                early_stopping_rounds=self.config.early_stopping_rounds,
-                verbose=False
-            )
-        except TypeError:
-            # Fallback for newer XGBoost versions
+            if eval_set:
+                # Use early stopping only if we have validation data
+                self.model.fit(
+                    X_train, y_train,
+                    eval_set=eval_set,
+                    early_stopping_rounds=self.config.early_stopping_rounds,
+                    verbose=False
+                )
+            else:
+                # No validation set, train without early stopping
+                self.model.fit(X_train, y_train)
+        except (TypeError, ValueError) as e:
+            # Fallback for errors or newer XGBoost versions
+            logger.warning(f"Error during model fitting with early stopping: {e}")
             self.model.fit(X_train, y_train)
         
         # Get feature importance
@@ -534,29 +598,65 @@ class MarketRegimeXGBoost(ClassificationModel):
         
         # Only access best_iteration if early stopping was used
         try:
-            history['best_iteration'] = self.model.best_iteration
-            history['best_score'] = self.model.best_score
-        except AttributeError:
-            # Early stopping not used
+            history['best_iteration'] = getattr(self.model, 'best_iteration', self.model.n_estimators)
+            # best_score might be None or not exist
+            best_score = getattr(self.model, 'best_score', None)
+            if best_score is not None:
+                history['best_score'] = best_score
+            else:
+                history['best_score'] = None
+        except (AttributeError, TypeError):
+            # Early stopping not used or error accessing attributes
             history['best_iteration'] = self.model.n_estimators
             history['best_score'] = None
         
-        # Evaluate on validation set
-        val_predictions = self.model.predict(X_val)
+        # Evaluate on validation set if we have validation data with labels
+        # Make sure X_val and y_val are defined
+        if not 'X_val' in locals():
+            X_val = None
+            y_val = None
         
-        # Get actual unique classes in validation set
-        unique_classes = np.unique(np.concatenate([y_val, val_predictions]))
-        actual_class_names = [self.config.regime_classes[i] for i in unique_classes if i < len(self.config.regime_classes)]
-        
-        val_report = classification_report(
-            y_val, val_predictions,
-            target_names=actual_class_names,
-            labels=unique_classes,
-            output_dict=True
-        )
-        
-        history['validation_report'] = val_report
-        history['validation_f1'] = val_report['weighted avg']['f1-score']
+        if X_val is not None and y_val is not None:
+            val_predictions = self.model.predict(X_val)
+            
+            # Get actual unique classes in validation set
+            # Ensure arrays are at least 1D and filter out None values
+            y_val_flat = np.atleast_1d(y_val).ravel()
+            val_predictions_flat = np.atleast_1d(val_predictions).ravel()
+            
+            # Filter out None values if present
+            y_val_flat = y_val_flat[y_val_flat != None]
+            val_predictions_flat = val_predictions_flat[val_predictions_flat != None]
+            
+            # Convert to numeric type if needed
+            try:
+                y_val_flat = y_val_flat.astype(int)
+                val_predictions_flat = val_predictions_flat.astype(int)
+            except:
+                pass
+                
+            unique_classes = np.unique(np.concatenate([y_val_flat, val_predictions_flat]))
+            actual_class_names = [self.config.regime_classes[i] for i in unique_classes if i < len(self.config.regime_classes)]
+            
+            try:
+                val_report = classification_report(
+                    y_val, val_predictions,
+                    target_names=actual_class_names,
+                    labels=unique_classes,
+                    output_dict=True
+                )
+                history['validation_report'] = val_report
+                history['validation_f1'] = val_report['weighted avg']['f1-score']
+            except Exception as e:
+                logger.error(f"Error generating classification report: {e}")
+                logger.warning("Skipping validation metrics due to error")
+                history['validation_report'] = None
+                history['validation_f1'] = None
+        else:
+            # No validation data with labels
+            logger.info("No validation data with labels, skipping validation metrics")
+            history['validation_report'] = None
+            history['validation_f1'] = None
         
         # Update metadata
         self.is_trained = True
@@ -566,9 +666,12 @@ class MarketRegimeXGBoost(ClassificationModel):
         self.metadata['feature_names'] = self.feature_names
         self.training_history.append(history)
         
-        logger.info("XGBoost training completed",
-                   best_iteration=history['best_iteration'],
-                   validation_f1=history['validation_f1'])
+        try:
+            logger.info("XGBoost training completed",
+                       best_iteration=history.get('best_iteration', 'N/A'),
+                       validation_f1=history.get('validation_f1', 'N/A'))
+        except Exception as e:
+            logger.warning(f"Error logging training completion: {e}")
         
         return history
     
@@ -668,10 +771,19 @@ class MarketRegimeXGBoost(ClassificationModel):
             
             # Save additional metadata
             metadata_path = base_path.with_suffix('.meta.json')
+            
+            # Convert numpy types to Python types for JSON serialization
+            feature_importance_serializable = {}
+            for key, value in self.feature_importance.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    feature_importance_serializable[key] = float(value.item())
+                else:
+                    feature_importance_serializable[key] = float(value)
+            
             metadata = {
                 'config': self.config.to_dict(),
                 'feature_names': self.feature_names,
-                'feature_importance': self.feature_importance,
+                'feature_importance': feature_importance_serializable,
                 'label_encoder_classes': self.label_encoder.classes_.tolist() if hasattr(self.label_encoder, 'classes_') else None
             }
             

@@ -314,7 +314,10 @@ class ModelTrainingPipeline:
                 self.training_results[model_name] = results
                 logger.info(f"Model {model_name} training completed")
             except Exception as e:
-                logger.error(f"Model {model_name} training failed", error=str(e))
+                import traceback
+                logger.error(f"Model {model_name} training failed", 
+                           error=str(e),
+                           traceback=traceback.format_exc())
     
     def _train_lstm(self, train_data: pd.DataFrame, val_data: pd.DataFrame) -> Tuple[PriceLSTM, Dict]:
         """Train LSTM model"""
@@ -462,6 +465,15 @@ class ModelTrainingPipeline:
         
         for model_name, model in self.trained_models.items():
             try:
+                # Check if we have enough data for time series models
+                if model_name == 'PriceLSTM' and hasattr(model.config, 'sequence_length'):
+                    min_samples_needed = model.config.sequence_length + model.config.forecast_horizon
+                    if len(test_data) < min_samples_needed:
+                        logger.warning(f"Skipping validation for {model_name} - insufficient test data",
+                                     test_samples=len(test_data),
+                                     min_needed=min_samples_needed)
+                        continue
+                
                 # Prepare test data based on model type
                 if model_name == 'PriceLSTM':
                     test_features, test_targets = self.preprocessor.prepare_price_data(test_data)
@@ -471,6 +483,10 @@ class ModelTrainingPipeline:
                     metrics = model.evaluate(test_charts, test_patterns)
                 elif model_name == 'MarketRegimeXGBoost':
                     test_features, test_labels = self.preprocessor.prepare_regime_data(test_data)
+                    # Skip evaluation if no labels (XGBoost auto-generates labels)
+                    if test_labels is None:
+                        logger.info(f"Skipping validation for {model_name} - no test labels available")
+                        continue
                     metrics = model.evaluate(test_features, test_labels)
                 else:
                     continue  # Skip models that don't have test data

@@ -30,15 +30,16 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent / 'src'))
+# Add project root to path
+sys.path.append(str(Path(__file__).parent.parent))
 
-from training.training_pipeline import ModelTrainingPipeline, TrainingConfig
-from training.model_persistence import ModelPersistence, PersistenceConfig
-from data.data_fetcher import DataFetcher, FetcherConfig
-from data.data_interface import DataInterface
-from database.database import DatabaseManager
-from features.feature_pipeline import FeaturePipeline, FeatureConfig
+from src.training.training_pipeline import ModelTrainingPipeline, TrainingConfig
+from src.training.model_persistence import ModelPersistence, PersistenceConfig
+from src.data.data_fetcher import DataFetcher, FetcherConfig
+from src.data.data_interface import DataInterface
+from src.database.database import DatabaseManager
+from src.features.feature_pipeline import FeaturePipeline, FeatureConfig
+from src.configuration import load_config, Config
 
 logger = structlog.get_logger(__name__)
 
@@ -46,9 +47,15 @@ logger = structlog.get_logger(__name__)
 class ModelTrainer:
     """Main class for training and saving models"""
     
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize model trainer"""
+    def __init__(self, config: Config, command_args: Optional[Dict[str, Any]] = None):
+        """Initialize model trainer
+        
+        Args:
+            config: Central configuration object from configuration.py
+            command_args: Optional command line arguments to override config
+        """
         self.config = config
+        self.command_args = command_args or {}
         
         # Initialize components
         self.db_manager = None
@@ -63,36 +70,50 @@ class ModelTrainer:
         try:
             # Initialize database
             logger.info("Initializing database...")
-            db_url = self.config.get('database_url', 'sqlite:///quantum_sentiment.db')
+            db_url = self.config.database.get('connection_string', 'sqlite:///quantum_sentiment.db')
             self.db_manager = DatabaseManager(db_url)
             
             # Initialize data fetcher
             logger.info("Initializing data fetcher...")
             data_interface = DataInterface()
-            fetcher_config = FetcherConfig()
+            
+            # Create FetcherConfig from central config
+            fetcher_config = FetcherConfig(
+                enable_alpaca=self.config.data_sources.get('alpaca', {}).get('enabled', True),
+                enable_alpha_vantage=self.config.data_sources.get('alpha_vantage', {}).get('enabled', True),
+                alpaca_rate_limit=self.config.data_sources.get('alpaca', {}).get('rate_limit', 200),
+                alpha_vantage_rate_limit=self.config.data_sources.get('alpha_vantage', {}).get('rate_limit', 5)
+            )
             self.data_fetcher = DataFetcher(fetcher_config, data_interface)
             
             # Initialize training pipeline
             logger.info("Initializing training pipeline...")
+            
+            # Create TrainingConfig from central config
+            ml_config = self.config.ml.to_dict()
+            models = ml_config.get('models', {})
+            
+            # Use command line arguments to override which models to train
+            models_to_train = self.command_args.get('models_to_train', [])
+            
             training_config = TrainingConfig(
-                train_start_date=self.config.get('train_start_date', '2022-01-01'),
-                train_end_date=self.config.get('train_end_date', '2024-12-31'),
-                parallel_training=self.config.get('parallel_training', True),
-                max_workers=self.config.get('max_workers', 4),
-                train_lstm=self.config.get('train_lstm', True),
-                train_cnn=self.config.get('train_cnn', True),
-                train_xgboost=self.config.get('train_xgboost', True),
-                train_finbert=self.config.get('train_finbert', False),  # Heavy compute
-                train_ensemble=self.config.get('train_ensemble', True),
-                model_save_dir=Path(self.config.get('model_save_dir', 'models'))
+                train_start_date=self.config.backtest.get('start_date', '2022-01-01'),
+                train_end_date=self.config.backtest.get('end_date', '2024-12-31'),
+                parallel_training=self.command_args.get('parallel', True),
+                max_workers=self.command_args.get('workers', 4),
+                train_lstm='lstm' in models_to_train if models_to_train else models.get('price_lstm', {}).get('enabled', True),
+                train_cnn='cnn' in models_to_train if models_to_train else models.get('pattern_cnn', {}).get('enabled', True),
+                train_xgboost='xgboost' in models_to_train if models_to_train else models.get('regime_xgboost', {}).get('enabled', True),
+                train_finbert='finbert' in models_to_train if models_to_train else models.get('sentiment_bert', {}).get('enabled', False),
+                train_ensemble='ensemble' in models_to_train if models_to_train else ml_config.get('ensemble', {}).get('voting', 'weighted') is not None,
+                model_save_dir=Path(self.command_args.get('output_dir', self.config.paths.get('models', 'models')))
             )
             self.training_pipeline = ModelTrainingPipeline(training_config)
             
             # Initialize model persistence
             logger.info("Initializing model persistence...")
             persistence_config = PersistenceConfig(
-                model_registry_path=Path(self.config.get('model_registry_path', 'model_registry')),
-                use_model_registry=True,
+                model_registry_path=Path(self.config.paths.get('models', 'model_registry')),
                 auto_cleanup=True,
                 max_versions_per_model=5
             )
@@ -106,53 +127,66 @@ class ModelTrainer:
             return False
     
     async def load_training_data(self, symbols: List[str], days: int) -> pd.DataFrame:
-        """Load and prepare training data"""
+        """Load and prepare training data
+        
+        Fetches the highest resolution data (1Hour) and creates consistent
+        temporal data for training. Does not mix different timeframes.
+        """
         logger.info("Loading training data", symbols=symbols, days=days)
         
-        all_data = []
+        # Fetch high-resolution data (1Hour) for all symbols in one batch
+        logger.info(f"Fetching 1Hour data for {len(symbols)} symbols")
         
-        for symbol in symbols:
-            try:
-                # Get market data for multiple timeframes
-                for timeframe in ['1Day', '1Hour']:
-                    logger.info(f"Fetching {timeframe} data for {symbol}")
+        try:
+            market_results = await self.data_fetcher.fetch_market_data(
+                symbols=symbols,
+                timeframe='1Hour',  # Use highest resolution available
+                days_back=days
+            )
+            
+            all_data = []
+            for symbol in symbols:
+                symbol_data = market_results.get(symbol, pd.DataFrame())
+                
+                if not symbol_data.empty:
+                    # Ensure timestamp is a column, not index
+                    if symbol_data.index.name == 'timestamp' or isinstance(symbol_data.index, pd.DatetimeIndex):
+                        symbol_data = symbol_data.reset_index()
                     
-                    market_results = await self.data_fetcher.fetch_market_data(
-                        symbols=[symbol],
-                        timeframe=timeframe,
-                        days_back=days
-                    )
+                    symbol_data['symbol'] = symbol
+                    all_data.append(symbol_data)
+                    logger.info(f"Loaded {len(symbol_data)} records for {symbol}")
+                else:
+                    logger.warning(f"No data found for {symbol}")
                     
-                    symbol_data = market_results.get(symbol, pd.DataFrame())
-                    
-                    if not symbol_data.empty:
-                        symbol_data['symbol'] = symbol
-                        symbol_data['timeframe'] = timeframe
-                        all_data.append(symbol_data)
-                        logger.info(f"Loaded {len(symbol_data)} records for {symbol} {timeframe}")
-                    else:
-                        logger.warning(f"No data found for {symbol} {timeframe}")
-                        
-            except Exception as e:
-                logger.error(f"Failed to load data for {symbol}", error=str(e))
+        except Exception as e:
+            logger.error(f"Failed to load market data", error=str(e))
+            raise
         
         if not all_data:
             raise ValueError("No training data could be loaded")
         
-        # Combine all data
+        # Combine all data with consistent timeframe
         combined_data = pd.concat(all_data, ignore_index=True)
         
-        # Ensure timestamp column exists and is datetime
+        # The data from get_bars has timestamp as index, we need it as a column
         if 'timestamp' not in combined_data.columns:
-            combined_data.reset_index(inplace=True)
-            if 'index' in combined_data.columns:
-                combined_data.rename(columns={'index': 'timestamp'}, inplace=True)
+            # If index has datetime data, use it as timestamp
+            if isinstance(combined_data.index, pd.DatetimeIndex):
+                combined_data['timestamp'] = combined_data.index
+            else:
+                combined_data.reset_index(inplace=True)
+                if 'index' in combined_data.columns:
+                    combined_data.rename(columns={'index': 'timestamp'}, inplace=True)
         
         # Convert timestamp to datetime if it's not already
         combined_data['timestamp'] = pd.to_datetime(combined_data['timestamp'])
         
-        # Sort by timestamp
-        combined_data.sort_values('timestamp', inplace=True)
+        # Sort by timestamp and symbol for proper time series ordering
+        combined_data.sort_values(['symbol', 'timestamp'], inplace=True)
+        
+        # Reset index for clean sequential indexing
+        combined_data.reset_index(drop=True, inplace=True)
         
         logger.info("Training data loaded successfully", 
                    total_records=len(combined_data),
@@ -360,21 +394,20 @@ async def main():
         # Parse symbols
         symbols = [s.strip().upper() for s in args.symbols.split(',')]
         
-        # Create training configuration
-        config = {
-            'train_lstm': 'lstm' in models_to_train,
-            'train_cnn': 'cnn' in models_to_train,
-            'train_xgboost': 'xgboost' in models_to_train,
-            'train_finbert': 'finbert' in models_to_train,
-            'train_ensemble': 'ensemble' in models_to_train,
-            'parallel_training': args.parallel,
-            'max_workers': args.workers,
-            'model_registry_path': args.output_dir,
-            'model_save_dir': f"{args.output_dir}/saved_models"
+        # Load central configuration
+        config_path = args.config if args.config else None
+        config = load_config(config_path)
+        
+        # Prepare command line arguments for trainer
+        command_args = {
+            'models_to_train': models_to_train,
+            'parallel': args.parallel,
+            'workers': args.workers,
+            'output_dir': args.output_dir
         }
         
         # Initialize trainer
-        trainer = ModelTrainer(config)
+        trainer = ModelTrainer(config, command_args)
         
         if not await trainer.initialize():
             logger.error("Failed to initialize trainer")

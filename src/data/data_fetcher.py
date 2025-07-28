@@ -285,25 +285,19 @@ class DataFetcher:
         return health
     
     async def fetch_market_data(self, symbols: List[str], timeframe: str = "1Day", days_back: int = 365) -> Dict[str, pd.DataFrame]:
-        """Fetch market data for symbols"""
+        """Fetch market data for symbols using batch API when possible"""
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
             
-            results = {}
-            for symbol in symbols:
-                try:
-                    data = self.alpaca_client.get_bars(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        start=start_date,
-                        end=end_date,
-                        limit=1000
-                    )
-                    results[symbol] = data
-                except Exception as e:
-                    logger.error("Failed to fetch market data for symbol", symbol=symbol, error=str(e))
-                    results[symbol] = pd.DataFrame()
+            # Use batch API for efficiency
+            results = self.alpaca_client.get_multiple_bars(
+                symbols=symbols,
+                timeframe=timeframe,
+                start=start_date,
+                end=end_date,
+                limit=1000
+            )
             
             return results
         except Exception as e:
