@@ -110,17 +110,23 @@ class ClassificationModel(BaseModel):
         max_samples = counts.max()
         imbalance_ratio = max_samples / min_samples
         
-        if imbalance_ratio > 10:
+        # Check if we have enough samples for SMOTE (needs at least 6 neighbors)
+        if min_samples < 7:
+            logger.warning(f"Not enough samples for SMOTE (min class has {min_samples} samples). Skipping balancing.")
+            X_balanced = X_flat
+            y_balanced = y
+        elif imbalance_ratio > 10:
             # Severe imbalance - use SMOTEENN
             sampler = SMOTEENN(random_state=42)
+            X_balanced, y_balanced = sampler.fit_resample(X_flat, y)
         elif imbalance_ratio > 3:
             # Moderate imbalance - use SMOTE
             sampler = SMOTE(random_state=42)
+            X_balanced, y_balanced = sampler.fit_resample(X_flat, y)
         else:
             # Mild imbalance - use undersampling
             sampler = RandomUnderSampler(random_state=42)
-        
-        X_balanced, y_balanced = sampler.fit_resample(X_flat, y)
+            X_balanced, y_balanced = sampler.fit_resample(X_flat, y)
         
         # Reshape back to original dimensions if needed
         if needs_reshape:

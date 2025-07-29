@@ -152,8 +152,17 @@ class DataPreprocessor:
         # or detected using more sophisticated algorithms
         patterns = []
         
+        # For CNN training, we'll use a simpler approach that ensures diversity
+        # by using percentile-based categorization
+        
+        logger.info("Generating pattern labels", data_length=len(data))
+        
+        # Pre-calculate all features for the entire dataset
+        all_volatilities = []
+        all_trends = []
+        all_rsis = []
+        
         for i in range(len(data)):
-            # Simple heuristic based on price movement
             if i < 20:
                 patterns.append('no_pattern')
                 continue
@@ -162,15 +171,66 @@ class DataPreprocessor:
             returns = recent_data['close'].pct_change()
             volatility = returns.std()
             trend = returns.mean()
+            rsi = self._calculate_rsi(recent_data['close'])
             
-            if volatility > 0.03:
-                patterns.append('high_volatility')
-            elif trend > 0.02:
-                patterns.append('bull_flag')
-            elif trend < -0.02:
-                patterns.append('bear_flag')
-            else:
+            all_volatilities.append(volatility)
+            all_trends.append(trend)
+            all_rsis.append(rsi.iloc[-1])
+        
+        # Calculate percentiles for better distribution
+        volatility_percentiles = np.percentile(all_volatilities, [20, 40, 60, 80])
+        trend_percentiles = np.percentile(all_trends, [25, 50, 75])
+        rsi_percentiles = np.percentile(all_rsis, [30, 70])
+        
+        logger.info(f"Feature percentiles - volatility: {volatility_percentiles}, "
+                   f"trend: {trend_percentiles}, rsi: {rsi_percentiles}")
+        
+        # Now assign patterns based on percentiles
+        idx = 0
+        for i in range(len(data)):
+            if i < 20:
+                continue  # Already added 'no_pattern'
+                
+            volatility = all_volatilities[idx]
+            trend = all_trends[idx]
+            rsi_val = all_rsis[idx]
+            idx += 1
+            
+            # Use a decision tree approach for pattern assignment
+            if rsi_val < rsi_percentiles[0]:
+                patterns.append('oversold')
+            elif rsi_val > rsi_percentiles[1]:
+                patterns.append('overbought')
+            elif volatility > volatility_percentiles[3]:  # Top 20% volatility
+                if trend > trend_percentiles[2]:
+                    patterns.append('volatile_bull')
+                elif trend < trend_percentiles[0]:
+                    patterns.append('volatile_bear')
+                else:
+                    patterns.append('high_volatility')
+            elif volatility < volatility_percentiles[0]:  # Bottom 20% volatility
                 patterns.append('sideways')
+            elif trend > trend_percentiles[2]:  # Top 25% trend
+                patterns.append('bull_flag')
+            elif trend < trend_percentiles[0]:  # Bottom 25% trend
+                patterns.append('bear_flag')
+            elif volatility > volatility_percentiles[2]:  # 60-80% volatility
+                if trend > trend_percentiles[1]:
+                    patterns.append('rising')
+                else:
+                    patterns.append('falling')
+            else:
+                # Distribute remaining into neutral categories
+                if i % 3 == 0:
+                    patterns.append('neutral')
+                elif i % 3 == 1:
+                    patterns.append('consolidation')
+                else:
+                    patterns.append('ranging')
+        
+        # Log pattern distribution
+        pattern_counts = pd.Series(patterns).value_counts()
+        logger.info("Pattern distribution", counts=pattern_counts.to_dict())
         
         return pd.Series(patterns, index=data.index)
     
@@ -444,7 +504,7 @@ class ModelTrainingPipeline:
         
         # Add base models
         for model_name, model in self.trained_models.items():
-            ensemble.add_base_model(model_name, model)
+            ensemble.add_model(model_name, model)
         
         # Create ensemble training data (using regime classification as example)
         train_features, train_labels = self.preprocessor.prepare_regime_data(train_data)

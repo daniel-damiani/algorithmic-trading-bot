@@ -173,6 +173,12 @@ class ChartPatternCNN(ClassificationModel):
         
     def build_model(self) -> ChartPatternCNNNetwork:
         """Build the CNN model"""
+        # Update config with actual number of classes if label encoder is fitted
+        if hasattr(self, 'label_encoder') and self.label_encoder is not None:
+            self.config.n_classes = len(self.label_encoder.classes_)
+            self.config.pattern_classes = list(self.label_encoder.classes_)
+            logger.info(f"Updated CNN config with {self.config.n_classes} classes from label encoder")
+        
         self.model = ChartPatternCNNNetwork(self.config)
         self.model.to(self.device)
         
@@ -482,9 +488,7 @@ class ChartPatternCNN(ClassificationModel):
         
         if labels is not None:
             y = np.array(pattern_labels)
-            # Encode labels if string
-            if y.dtype == object:
-                y = self.encode_labels(y, fit=is_training)
+            # Don't encode labels here - let train method handle it
         
         return X, y
     
@@ -497,10 +501,34 @@ class ChartPatternCNN(ClassificationModel):
     ) -> Dict[str, Any]:
         """Train the CNN model"""
         
+        # First, fit the label encoder on all unique labels from both train and validation
+        if train_labels.dtype == object or (validation_data and validation_data[1].dtype == object):
+            all_unique_labels = set()
+            
+            # Get unique labels from training data
+            if isinstance(train_labels, pd.Series):
+                all_unique_labels.update(train_labels.unique())
+            else:
+                all_unique_labels.update(np.unique(train_labels))
+                
+            # Get unique labels from validation data
+            if validation_data and validation_data[1] is not None:
+                val_labels = validation_data[1]
+                if isinstance(val_labels, pd.Series):
+                    all_unique_labels.update(val_labels.unique())
+                else:
+                    all_unique_labels.update(np.unique(val_labels))
+            
+            # Fit label encoder on all unique labels
+            if self.label_encoder is None:
+                self.label_encoder = LabelEncoder()
+            self.label_encoder.fit(list(all_unique_labels))
+            logger.info(f"Fitted label encoder with {len(all_unique_labels)} classes")
+        
         # Prepare data
         X_train, y_train = self.prepare_data(train_data, train_labels, is_training=True)
         
-        # Build model if not already built
+        # Build model AFTER label encoder is fitted
         if self.model is None:
             self.build_model()
         
@@ -525,7 +553,7 @@ class ChartPatternCNN(ClassificationModel):
         
         # Ensure labels are encoded as integers
         if y_train.dtype == object or y_train.dtype.kind in ['U', 'S']:
-            y_train = self.encode_labels(y_train, fit=True)
+            y_train = self.encode_labels(y_train, fit=False)  # Already fitted above
         if y_val.dtype == object or y_val.dtype.kind in ['U', 'S']:
             y_val = self.encode_labels(y_val, fit=False)
         
