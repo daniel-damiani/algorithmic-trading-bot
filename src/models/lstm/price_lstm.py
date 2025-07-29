@@ -274,12 +274,22 @@ class PriceLSTM(TimeSeriesModel):
     ) -> Dict[str, Any]:
         """Train the LSTM model"""
         
-        # Prepare data
+        # Prepare data first to get feature dimensions
         X_train, y_train = self.prepare_data(train_data, train_labels, is_training=True)
         
-        # Build model if not already built
+        # Build model after data preparation (so we know input size)
         if self.model is None:
             self.build_model()
+        else:
+            # Check if input size changed
+            expected_size = self.model.lstm.input_size
+            actual_size = X_train.shape[-1]
+            if expected_size != actual_size:
+                logger.warning(f"Input size changed from {expected_size} to {actual_size}, rebuilding model")
+                self.model = None
+                self.optimizer = None
+                self.scheduler = None
+                self.build_model()
         
         # Prepare validation data
         X_val, y_val = None, None

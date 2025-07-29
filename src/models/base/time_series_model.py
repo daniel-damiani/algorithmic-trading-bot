@@ -24,7 +24,7 @@ class TimeSeriesConfig(ModelConfig):
     """Configuration specific to time series models"""
     
     # Time series specific parameters
-    sequence_length: int = 60  # Number of timesteps to look back
+    sequence_length: int = 30  # Reduced from 60 for smaller datasets
     stride: int = 1  # Step size for sliding window
     forecast_horizon: int = 1  # Number of timesteps to predict
     
@@ -36,7 +36,7 @@ class TimeSeriesConfig(ModelConfig):
     # Feature engineering
     add_time_features: bool = True  # Add hour, day, month features
     add_technical_indicators: bool = True
-    add_lag_features: bool = True
+    add_lag_features: bool = False  # Disabled to avoid dimension mismatch
     lag_periods: List[int] = None
     
     # Model architecture hints
@@ -203,7 +203,9 @@ class TimeSeriesModel(BaseModel):
             df = self.add_lag_features(df, numeric_cols)
         
         # Drop any remaining NaN values created by lagging
-        df = df.dropna()
+        # Keep more data by only dropping rows with NaN in critical columns
+        critical_cols = ['open', 'high', 'low', 'close', 'volume']
+        df = df.dropna(subset=[col for col in critical_cols if col in df.columns])
         
         # Store feature columns
         if is_training:
@@ -215,8 +217,17 @@ class TimeSeriesModel(BaseModel):
                 elif isinstance(labels, pd.DataFrame):
                     self.target_columns = labels.columns.tolist()
         
-        # Select features
-        feature_data = df[self.feature_columns].values
+        # Select features - ensure consistent columns
+        if is_training:
+            # During training, use all available columns
+            feature_data = df[self.feature_columns].values
+        else:
+            # During validation/inference, use only columns that were available during training
+            # Fill missing columns with 0
+            missing_cols = set(self.feature_columns) - set(df.columns)
+            for col in missing_cols:
+                df[col] = 0
+            feature_data = df[self.feature_columns].values
         
         # Scale features
         if self.scaler is not None:
