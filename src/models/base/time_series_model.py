@@ -11,6 +11,8 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import TimeSeriesSplit
 import structlog
+import joblib
+from pathlib import Path
 
 from .base_model import BaseModel, ModelConfig, ModelType
 
@@ -38,9 +40,9 @@ class TimeSeriesConfig(ModelConfig):
     lag_periods: List[int] = None
     
     # Model architecture hints
-    hidden_size: int = 128
-    num_layers: int = 2
-    bidirectional: bool = False
+    hidden_size: int = 256  # Increased default
+    num_layers: int = 3  # More layers
+    bidirectional: bool = True  # Use bidirectional LSTM
     
     def __post_init__(self):
         super().__post_init__()
@@ -56,14 +58,17 @@ class TimeSeriesModel(BaseModel):
         super().__init__(config)
         self.config: TimeSeriesConfig = config
         self.scaler = None
+        self.target_scaler = None  # Separate scaler for targets
         self.feature_columns = []
         self.target_columns = []
         
-        # Initialize scaler based on config
+        # Initialize scalers based on config
         if self.config.scaling_method == "standard":
             self.scaler = StandardScaler()
+            self.target_scaler = StandardScaler()
         elif self.config.scaling_method == "minmax":
             self.scaler = MinMaxScaler()
+            self.target_scaler = StandardScaler()  # Use StandardScaler for targets
     
     def create_sequences(
         self, 
@@ -147,18 +152,22 @@ class TimeSeriesModel(BaseModel):
     
     def add_lag_features(self, df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
         """Add lagged features"""
-        df = df.copy()
+        # Create all new columns at once to avoid fragmentation
+        new_columns = {}
         
         for col in columns:
             if col in df.columns:
                 for lag in self.config.lag_periods:
-                    df[f'{col}_lag_{lag}'] = df[col].shift(lag)
+                    new_columns[f'{col}_lag_{lag}'] = df[col].shift(lag)
                     
                 # Add rolling statistics
-                df[f'{col}_rolling_mean_7'] = df[col].rolling(window=7).mean()
-                df[f'{col}_rolling_std_7'] = df[col].rolling(window=7).std()
-                df[f'{col}_rolling_mean_30'] = df[col].rolling(window=30).mean()
-                df[f'{col}_rolling_std_30'] = df[col].rolling(window=30).std()
+                new_columns[f'{col}_rolling_mean_7'] = df[col].rolling(window=7).mean()
+                new_columns[f'{col}_rolling_std_7'] = df[col].rolling(window=7).std()
+                new_columns[f'{col}_rolling_mean_30'] = df[col].rolling(window=30).mean()
+                new_columns[f'{col}_rolling_std_30'] = df[col].rolling(window=30).std()
+        
+        # Concatenate all new columns at once
+        df = pd.concat([df, pd.DataFrame(new_columns)], axis=1)
         
         return df
     
@@ -222,6 +231,20 @@ class TimeSeriesModel(BaseModel):
                 labels = labels.values
             # Ensure labels are aligned with data
             labels = labels[-len(feature_data):]
+            
+            # Scale targets if scaler is available
+            if self.target_scaler is not None:
+                # Reshape if needed
+                labels_reshaped = labels.reshape(-1, 1) if len(labels.shape) == 1 else labels
+                
+                if is_training:
+                    labels = self.target_scaler.fit_transform(labels_reshaped)
+                else:
+                    labels = self.target_scaler.transform(labels_reshaped)
+                
+                # Flatten if originally 1D
+                if len(labels.shape) > 1 and labels.shape[1] == 1:
+                    labels = labels.flatten()
         
         # Create sequences
         sequences, target_sequences = self.create_sequences(feature_data, labels)
@@ -235,28 +258,19 @@ class TimeSeriesModel(BaseModel):
     
     def inverse_transform_predictions(self, predictions: np.ndarray) -> np.ndarray:
         """Inverse transform scaled predictions"""
-        if self.scaler is None or self.config.scaling_method == "none":
+        if self.target_scaler is None or self.config.scaling_method == "none":
             return predictions
         
-        # For multi-feature scaling, we need to pad predictions
-        n_features = len(self.feature_columns)
-        n_targets = predictions.shape[-1] if len(predictions.shape) > 1 else 1
+        # Use target scaler for inverse transformation
+        if len(predictions.shape) == 1:
+            predictions = predictions.reshape(-1, 1)
         
-        if n_targets < n_features:
-            # Pad predictions to match feature dimensions
-            padding = np.zeros((len(predictions), n_features - n_targets))
-            if len(predictions.shape) == 1:
-                predictions = predictions.reshape(-1, 1)
-            padded = np.hstack([predictions, padding])
-            
-            # Inverse transform
-            unscaled = self.scaler.inverse_transform(padded)
-            
-            # Extract target columns
-            return unscaled[:, :n_targets]
-        else:
-            # Direct inverse transform
-            return self.scaler.inverse_transform(predictions)
+        unscaled = self.target_scaler.inverse_transform(predictions)
+        
+        # Return original shape
+        if unscaled.shape[1] == 1:
+            return unscaled.flatten()
+        return unscaled
     
     def create_train_val_split(
         self, 
@@ -287,3 +301,50 @@ class TimeSeriesModel(BaseModel):
             base_lookback += 30  # For 30-day rolling features
         
         return base_lookback
+    
+    def save(self, path: Optional[Path] = None) -> Path:
+        """Save time series model with scalers"""
+        # Call parent save method
+        base_path = super().save(path)
+        
+        # Save scalers separately
+        if self.scaler is not None:
+            scaler_path = base_path.with_suffix('.scaler.pkl')
+            joblib.dump(self.scaler, scaler_path)
+            
+        if self.target_scaler is not None:
+            target_scaler_path = base_path.with_suffix('.target_scaler.pkl')
+            joblib.dump(self.target_scaler, target_scaler_path)
+            
+        # Save additional time series specific data
+        ts_data_path = base_path.with_suffix('.ts_data.pkl')
+        joblib.dump({
+            'feature_columns': self.feature_columns,
+            'target_columns': self.target_columns
+        }, ts_data_path)
+        
+        return base_path
+    
+    @classmethod
+    def load(cls, path: Path) -> 'TimeSeriesModel':
+        """Load time series model with scalers"""
+        # Call parent load method
+        model_instance = super().load(path)
+        
+        # Load scalers
+        scaler_path = path.with_suffix('.scaler.pkl')
+        if scaler_path.exists():
+            model_instance.scaler = joblib.load(scaler_path)
+            
+        target_scaler_path = path.with_suffix('.target_scaler.pkl')
+        if target_scaler_path.exists():
+            model_instance.target_scaler = joblib.load(target_scaler_path)
+            
+        # Load time series specific data
+        ts_data_path = path.with_suffix('.ts_data.pkl')
+        if ts_data_path.exists():
+            ts_data = joblib.load(ts_data_path)
+            model_instance.feature_columns = ts_data['feature_columns']
+            model_instance.target_columns = ts_data['target_columns']
+        
+        return model_instance

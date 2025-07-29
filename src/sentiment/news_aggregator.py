@@ -57,10 +57,12 @@ class NewsConfig:
             ]
         
         if self.news_sources is None:
+            # Use only valid NewsAPI source IDs
             self.news_sources = [
-                'bloomberg', 'reuters', 'cnbc', 'marketwatch', 
-                'seekingalpha', 'benzinga', 'yahoo-finance',
-                'financial-times', 'wall-street-journal'
+                'bloomberg', 
+                'business-insider',
+                'fortune',
+                'the-wall-street-journal'
             ]
 
 
@@ -282,19 +284,38 @@ class NewsAggregator:
             all_articles = []
             
             for query in queries:
-                params = {
+                # Try with high-quality domains first
+                params_domains = {
                     'q': query,
                     'language': self.config.language,
                     'sortBy': 'publishedAt',
                     'apiKey': self.config.newsapi_key,
                     'pageSize': self.config.max_articles_per_source // len(queries),
-                    'sources': ','.join(self.config.news_sources)
+                    'domains': 'bloomberg.com,reuters.com,cnbc.com,marketwatch.com,wsj.com,ft.com,fortune.com,businessinsider.com'
                 }
                 
-                response = requests.get(url, params=params, timeout=30)
+                response = requests.get(url, params=params_domains, timeout=30)
                 response.raise_for_status()
-                
                 data = response.json()
+                
+                articles_found = 0
+                if data['status'] == 'ok':
+                    articles_found = len(data.get('articles', []))
+                
+                # If no articles with domain filter, try without filter
+                if articles_found == 0:
+                    logger.debug(f"No articles found with domain filter for {query}, trying without filter")
+                    params_no_filter = {
+                        'q': query,
+                        'language': self.config.language,
+                        'sortBy': 'publishedAt',
+                        'apiKey': self.config.newsapi_key,
+                        'pageSize': self.config.max_articles_per_source // len(queries)
+                    }
+                    
+                    response = requests.get(url, params=params_no_filter, timeout=30)
+                    response.raise_for_status()
+                    data = response.json()
                 
                 if data['status'] == 'ok':
                     for article in data['articles']:

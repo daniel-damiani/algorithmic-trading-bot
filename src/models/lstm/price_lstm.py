@@ -27,32 +27,35 @@ class PriceLSTMConfig(TimeSeriesConfig):
     """Configuration for Price LSTM model"""
     
     # LSTM architecture
-    lstm_layers: int = 2
-    lstm_hidden_size: int = 128
-    lstm_dropout: float = 0.2
+    lstm_layers: int = 3  # Increased depth
+    lstm_hidden_size: int = 256  # Larger hidden size
+    lstm_dropout: float = 0.3  # More dropout
     
     # Attention mechanism
     use_attention: bool = True
-    attention_heads: int = 4
+    attention_heads: int = 8  # More attention heads
     
     # Additional layers
     fc_layers: List[int] = None
-    fc_dropout: float = 0.3
+    fc_dropout: float = 0.4  # More dropout in FC layers
     
     # Training parameters
     optimizer: str = "adam"  # "adam", "sgd", "rmsprop"
-    weight_decay: float = 1e-5
-    gradient_clip: float = 1.0
+    weight_decay: float = 1e-4  # More regularization
+    gradient_clip: float = 0.5  # Stricter gradient clipping
     
     # Learning rate schedule
     use_scheduler: bool = True
     scheduler_type: str = "cosine"  # "cosine", "step", "exponential"
     scheduler_patience: int = 5
     
+    # Batch normalization
+    use_batch_norm: bool = True
+    
     def __post_init__(self):
         super().__post_init__()
         if self.fc_layers is None:
-            self.fc_layers = [64, 32]
+            self.fc_layers = [128, 64, 32]  # Deeper FC network
         self.model_type = ModelType.PRICE_PREDICTION
         self.name = "PriceLSTM"
 
@@ -145,11 +148,11 @@ class PriceLSTMNetwork(nn.Module):
         prev_size = lstm_output_size
         
         for fc_size in config.fc_layers:
-            fc_layers.extend([
-                nn.Linear(prev_size, fc_size),
-                nn.ReLU(),
-                nn.Dropout(config.fc_dropout)
-            ])
+            fc_layers.append(nn.Linear(prev_size, fc_size))
+            if config.use_batch_norm:
+                fc_layers.append(nn.BatchNorm1d(fc_size))
+            fc_layers.append(nn.ReLU())
+            fc_layers.append(nn.Dropout(config.fc_dropout))
             prev_size = fc_size
         
         # Output layer

@@ -25,6 +25,7 @@ from ..models import (
     StackedEnsemble, StackedEnsembleConfig,
     BaseModel
 )
+from ..features.universal_features import UniversalFeatureGenerator, UniversalFeatureConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -82,49 +83,69 @@ class DataPreprocessor:
     
     def __init__(self, config: TrainingConfig):
         self.config = config
+        # Initialize universal feature generator
+        self.feature_generator = UniversalFeatureGenerator(UniversalFeatureConfig())
         
     def prepare_price_data(self, raw_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-        """Prepare price data for LSTM training"""
+        """Prepare price data for LSTM training using universal features"""
         # Sort by timestamp
         data = raw_data.sort_values('timestamp').copy()
         
-        # Calculate technical indicators
-        data['sma_20'] = data['close'].rolling(20).mean()
-        data['ema_12'] = data['close'].ewm(span=12).mean()
-        data['rsi'] = self._calculate_rsi(data['close'])
-        data['volatility'] = data['close'].pct_change().rolling(20).std()
+        # Generate universal features
+        features = self.feature_generator.generate_features(data, is_training=True)
         
-        # Create features
-        feature_cols = ['open', 'high', 'low', 'close', 'volume', 'sma_20', 'ema_12', 'rsi', 'volatility']
-        features = data[feature_cols].dropna()
+        # Transform features specifically for LSTM
+        features = self.feature_generator.transform_for_model(features, 'lstm')
         
-        # Create targets (next period return)
-        targets = data['close'].pct_change().shift(-1).dropna()
+        # Create targets - use log returns for better statistical properties
+        # and clip extreme values to reduce noise
+        targets = np.log(data['close'] / data['close'].shift(1)).shift(-1)
+        targets = targets.clip(lower=-0.05, upper=0.05)  # Clip to ±5% moves
         
-        # Align features and targets
-        min_len = min(len(features), len(targets))
-        features = features.iloc[:min_len]
-        targets = targets.iloc[:min_len]
+        # Align features and targets by matching indices
+        common_index = features.index.intersection(targets.index)
+        features = features.loc[common_index]
+        targets = targets.loc[common_index].dropna()
+        
+        # Final alignment after dropping NaN targets
+        features = features.loc[targets.index]
         
         return features, targets
     
     def prepare_chart_data(self, raw_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-        """Prepare chart data for CNN training"""
-        # Chart data preparation will be handled by the CNN model itself
-        # We just need to provide clean OHLCV data
+        """Prepare chart data for CNN training using universal features"""
+        # Sort by timestamp
         data = raw_data.sort_values('timestamp').copy()
         
-        # Create pattern labels (simplified - in practice would come from expert labeling)
+        # Generate universal features
+        features = self.feature_generator.generate_features(data, is_training=True)
+        
+        # Transform features specifically for CNN (returns OHLCV data)
+        chart_data = self.feature_generator.transform_for_model(features, 'cnn')
+        
+        # Create pattern labels using the same pattern generation logic
         patterns = self._generate_pattern_labels(data)
         
-        return data, patterns
+        # Align chart data and patterns
+        common_index = chart_data.index.intersection(patterns.index)
+        chart_data = chart_data.loc[common_index]
+        patterns = patterns.loc[common_index]
+        
+        return chart_data, patterns
     
     def prepare_regime_data(self, raw_data: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
-        """Prepare data for market regime classification"""
+        """Prepare data for market regime classification using universal features"""
+        # Sort by timestamp
         data = raw_data.sort_values('timestamp').copy()
         
+        # Generate universal features
+        features = self.feature_generator.generate_features(data, is_training=True)
+        
+        # Transform features specifically for XGBoost
+        regime_data = self.feature_generator.transform_for_model(features, 'xgboost')
+        
         # XGBoost model will auto-generate regime labels
-        return data, None
+        return regime_data, None
     
     def prepare_sentiment_data(self, text_data: List[str], sentiment_labels: List[str]) -> Tuple[List[str], np.ndarray]:
         """Prepare text data for sentiment analysis"""
@@ -305,8 +326,8 @@ class ModelTrainingPipeline:
         # Validate all models
         self._validate_models(test_data)
         
-        # Save models
-        self._save_models()
+        # Note: Model saving is handled by ModelPersistence in train_models.py
+        # to avoid double-saving and ensure proper versioning/metadata
         
         logger.info("Model training pipeline completed",
                    models_trained=list(self.trained_models.keys()),
@@ -489,9 +510,9 @@ class ModelTrainingPipeline:
         return model, history
     
     def _train_ensemble(self, train_data: pd.DataFrame, val_data: pd.DataFrame) -> StackedEnsemble:
-        """Train ensemble model"""
+        """Train ensemble model using standardized features"""
         
-        logger.info("Training ensemble model")
+        logger.info("Training ensemble model with standardized features")
         
         # Create config
         config = StackedEnsembleConfig(
@@ -506,13 +527,46 @@ class ModelTrainingPipeline:
         for model_name, model in self.trained_models.items():
             ensemble.add_model(model_name, model)
         
-        # Create ensemble training data (using regime classification as example)
-        train_features, train_labels = self.preprocessor.prepare_regime_data(train_data)
-        val_features, val_labels = self.preprocessor.prepare_regime_data(val_data)
+        # Prepare data with universal features for ensemble training
+        # Generate features once and transform for each model type
+        train_data_sorted = train_data.sort_values('timestamp').copy()
+        val_data_sorted = val_data.sort_values('timestamp').copy()
         
-        # Train ensemble
-        validation_data = (val_features, val_labels) if val_data is not None else None
-        history = ensemble.train(train_features, train_labels, validation_data=validation_data)
+        # Generate universal features
+        train_features = self.preprocessor.feature_generator.generate_features(train_data_sorted, is_training=True)
+        val_features = self.preprocessor.feature_generator.generate_features(val_data_sorted, is_training=False)
+        
+        # Create data dictionary with features for each model type
+        train_model_data = {
+            'PriceLSTM': self.preprocessor.feature_generator.transform_for_model(train_features, 'lstm'),
+            'ChartPatternCNN': self.preprocessor.feature_generator.transform_for_model(train_features, 'cnn'),
+            'MarketRegimeXGBoost': self.preprocessor.feature_generator.transform_for_model(train_features, 'xgboost')
+        }
+        
+        val_model_data = {
+            'PriceLSTM': self.preprocessor.feature_generator.transform_for_model(val_features, 'lstm'),
+            'ChartPatternCNN': self.preprocessor.feature_generator.transform_for_model(val_features, 'cnn'),
+            'MarketRegimeXGBoost': self.preprocessor.feature_generator.transform_for_model(val_features, 'xgboost')
+        }
+        
+        # Create simple synthetic labels for ensemble training (binary classification)
+        # In practice, you'd use actual trading signals or regime classifications
+        returns = train_data_sorted['close'].pct_change()
+        train_labels = (returns > returns.median()).astype(int)
+        
+        val_returns = val_data_sorted['close'].pct_change()
+        val_labels = (val_returns > val_returns.median()).astype(int)
+        
+        # Align labels with features
+        common_train_idx = train_features.index.intersection(train_labels.index)
+        train_labels = train_labels.loc[common_train_idx]
+        
+        common_val_idx = val_features.index.intersection(val_labels.index)
+        val_labels = val_labels.loc[common_val_idx]
+        
+        # Train ensemble with model-specific data
+        validation_data = (val_model_data, val_labels) if val_data is not None else None
+        history = ensemble.train(train_model_data, train_labels, validation_data=validation_data)
         
         self.training_results['StackedEnsemble'] = history
         
@@ -534,7 +588,7 @@ class ModelTrainingPipeline:
                                      min_needed=min_samples_needed)
                         continue
                 
-                # Prepare test data based on model type
+                # Prepare test data based on model type using universal features
                 if model_name == 'PriceLSTM':
                     test_features, test_targets = self.preprocessor.prepare_price_data(test_data)
                     metrics = model.evaluate(test_features, test_targets)
@@ -548,6 +602,26 @@ class ModelTrainingPipeline:
                         logger.info(f"Skipping validation for {model_name} - no test labels available")
                         continue
                     metrics = model.evaluate(test_features, test_labels)
+                elif model_name == 'StackedEnsemble':
+                    # For ensemble, prepare model-specific data
+                    test_data_sorted = test_data.sort_values('timestamp').copy()
+                    test_features = self.preprocessor.feature_generator.generate_features(test_data_sorted, is_training=False)
+                    
+                    test_model_data = {
+                        'PriceLSTM': self.preprocessor.feature_generator.transform_for_model(test_features, 'lstm'),
+                        'ChartPatternCNN': self.preprocessor.feature_generator.transform_for_model(test_features, 'cnn'),
+                        'MarketRegimeXGBoost': self.preprocessor.feature_generator.transform_for_model(test_features, 'xgboost')
+                    }
+                    
+                    # Create test labels (binary classification)
+                    returns = test_data_sorted['close'].pct_change()
+                    test_labels = (returns > returns.median()).astype(int)
+                    
+                    # Align labels with features
+                    common_idx = test_features.index.intersection(test_labels.index)
+                    test_labels = test_labels.loc[common_idx]
+                    
+                    metrics = model.evaluate(test_model_data, test_labels)
                 else:
                     continue  # Skip models that don't have test data
                 

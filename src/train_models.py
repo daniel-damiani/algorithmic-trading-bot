@@ -20,7 +20,7 @@ import asyncio
 import sys
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -40,6 +40,8 @@ from src.data.data_interface import DataInterface
 from src.database.database import DatabaseManager
 from src.features.feature_pipeline import FeaturePipeline, FeatureConfig
 from src.configuration import load_config, Config
+from src.data.reddit_client import RedditClient
+from src.sentiment.news_aggregator import NewsAggregator, NewsConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +64,8 @@ class ModelTrainer:
         self.data_fetcher = None
         self.training_pipeline = None
         self.model_persistence = None
+        self.reddit_client = None
+        self.news_aggregator = None
         
         logger.info("Model trainer initialized")
     
@@ -113,11 +117,38 @@ class ModelTrainer:
             # Initialize model persistence
             logger.info("Initializing model persistence...")
             persistence_config = PersistenceConfig(
-                model_registry_path=Path(self.config.paths.get('models', 'model_registry')),
+                model_registry_path=Path('models'),  # Versioned storage directory
                 auto_cleanup=True,
                 max_versions_per_model=5
             )
             self.model_persistence = ModelPersistence(persistence_config)
+            
+            # Initialize Reddit client for sentiment data
+            logger.info("Initializing Reddit client...")
+            try:
+                self.reddit_client = RedditClient()
+                logger.info("Reddit client initialized for sentiment data collection")
+            except Exception as e:
+                logger.warning("Reddit client initialization failed", error=str(e))
+                self.reddit_client = None
+            
+            # Initialize News aggregator
+            logger.info("Initializing News aggregator...")
+            try:
+                news_config = NewsConfig(
+                    alpha_vantage_key=os.getenv('ALPHA_VANTAGE_API_KEY'),
+                    newsapi_key=os.getenv('NEWSAPI_KEY')
+                )
+                self.news_aggregator = NewsAggregator(news_config)
+                # Initialize news aggregator (it's not async)
+                if self.news_aggregator.initialize():
+                    logger.info("News aggregator initialized for sentiment data collection")
+                else:
+                    logger.warning("News aggregator initialization failed")
+                    self.news_aggregator = None
+            except Exception as e:
+                logger.warning("News aggregator initialization failed", error=str(e))
+                self.news_aggregator = None
             
             logger.info("All components initialized successfully")
             return True
@@ -195,14 +226,213 @@ class ModelTrainer:
         
         return combined_data
     
-    async def train_all_models(self, training_data: pd.DataFrame) -> Dict[str, Any]:
+    async def load_text_data(self, symbols: List[str], days: int = 30) -> Optional[Dict[str, Any]]:
+        """Load text data for sentiment analysis training
+        
+        Fetches text data (Reddit posts, news articles) for the training symbols
+        to train the FinBERT model with real sentiment data.
+        
+        Args:
+            symbols: List of stock symbols
+            days: Number of days to look back for text data
+            
+        Returns:
+            Dictionary containing texts and labels for training, or None if insufficient data
+        """
+        logger.info("Loading text data for sentiment training", symbols=symbols, days=days)
+        
+        all_texts = []
+        all_labels = []
+        total_articles = 0
+        
+        try:
+            # Collect text data from each symbol
+            for symbol in symbols:
+                symbol_texts = []
+                symbol_labels = []
+                
+                # Get Reddit data if available
+                if self.reddit_client:
+                    try:
+                        reddit_data = self.reddit_client.analyze_ticker_sentiment(
+                            ticker=symbol,
+                            hours_back=days * 24,
+                            min_mentions=3
+                        )
+                        
+                        if reddit_data.get('mention_count', 0) > 0:
+                            # Get actual posts for this ticker
+                            reddit_posts = []
+                            for subreddit in self.reddit_client.subreddits[:3]:  # Limit to top 3 subreddits
+                                posts = self.reddit_client.search_posts(
+                                    query=f'${symbol}',
+                                    subreddit=subreddit,
+                                    time_filter='month',
+                                    limit=20
+                                )
+                                reddit_posts.extend(posts)
+                            
+                            # Process Reddit posts
+                            for post in reddit_posts:
+                                text = f"{post.get('title', '')} {post.get('selftext', '')}"
+                                text = text.strip()
+                                
+                                if len(text) > 10:  # Minimum text length
+                                    symbol_texts.append(text)
+                                    
+                                    # Create labels based on sentiment indicators
+                                    score = post.get('score', 0)
+                                    bullish_emojis = post.get('bullish_emojis', 0)
+                                    bearish_emojis = post.get('bearish_emojis', 0)
+                                    
+                                    # Simple labeling heuristic
+                                    if bullish_emojis > bearish_emojis and score > 10:
+                                        label = 'positive'
+                                    elif bearish_emojis > bullish_emojis and score > 5:
+                                        label = 'negative'
+                                    else:
+                                        label = 'neutral'
+                                    
+                                    symbol_labels.append(label)
+                            
+                            logger.info(f"Collected {len(symbol_texts)} Reddit texts for {symbol}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to get Reddit data for {symbol}", error=str(e))
+                
+                # Get News data if available
+                if self.news_aggregator:
+                    try:
+                        news_data = self.news_aggregator.analyze_symbol(
+                            symbol=symbol,
+                            hours_back=days * 24
+                        )
+                        
+                        if news_data.get('total_articles', 0) > 0:
+                            # Get sample articles from news data
+                            sample_articles = news_data.get('sample_articles', [])
+                            
+                            for article in sample_articles:
+                                title = article.get('title', '')
+                                summary = article.get('summary', '')
+                                text = f"{title} {summary}".strip()
+                                
+                                if len(text) > 20:  # Minimum text length for news
+                                    symbol_texts.append(text)
+                                    
+                                    # Use news sentiment score for labeling
+                                    sentiment_score = article.get('sentiment_score', 0)
+                                    if sentiment_score > 0.1:
+                                        label = 'positive'
+                                    elif sentiment_score < -0.1:
+                                        label = 'negative'
+                                    else:
+                                        label = 'neutral'
+                                    
+                                    symbol_labels.append(label)
+                            
+                            logger.info(f"Collected {len(sample_articles)} news texts for {symbol}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to get news data for {symbol}", error=str(e))
+                
+                # Add to overall dataset
+                all_texts.extend(symbol_texts)
+                all_labels.extend(symbol_labels)
+                total_articles += len(symbol_texts)
+                
+                logger.info(f"Collected total {len(symbol_texts)} texts for {symbol}")
+            
+            # Check if we have sufficient data
+            min_texts_required = 40  # Minimum texts needed for meaningful training (reduced from 50)
+            
+            if len(all_texts) < min_texts_required:
+                logger.warning("Insufficient text data for sentiment training", 
+                             collected=len(all_texts),
+                             required=min_texts_required)
+                return None
+            
+            # Balance the dataset if needed
+            balanced_texts, balanced_labels = self._balance_sentiment_dataset(all_texts, all_labels)
+            
+            text_data = {
+                'texts': balanced_texts,
+                'labels': balanced_labels,
+                'total_samples': len(balanced_texts),
+                'label_distribution': {
+                    'positive': balanced_labels.count('positive'),
+                    'negative': balanced_labels.count('negative'),
+                    'neutral': balanced_labels.count('neutral')
+                },
+                'sources': {
+                    'reddit': bool(self.reddit_client),
+                    'news': bool(self.news_aggregator)
+                }
+            }
+            
+            logger.info("Text data collection completed",
+                       total_texts=len(balanced_texts),
+                       sources_used=len([k for k, v in text_data['sources'].items() if v]),
+                       distribution=text_data['label_distribution'])
+            
+            return text_data
+            
+        except Exception as e:
+            logger.error("Failed to load text data", error=str(e))
+            return None
+    
+    def _balance_sentiment_dataset(self, texts: List[str], labels: List[str]) -> Tuple[List[str], List[str]]:
+        """Balance the sentiment dataset to avoid class imbalance"""
+        from collections import Counter
+        
+        # Count labels
+        label_counts = Counter(labels)
+        logger.info("Original label distribution", counts=dict(label_counts))
+        
+        # Find minimum count (to balance down to)
+        min_count = min(label_counts.values()) if label_counts else 0
+        
+        # If we have very few of any class, don't balance (keep all data)
+        if min_count < 10:
+            logger.info("Not balancing dataset due to insufficient samples per class")
+            return texts, labels
+        
+        # Balance by taking up to min_count samples from each class
+        balanced_texts = []
+        balanced_labels = []
+        label_sample_counts = Counter()
+        
+        for text, label in zip(texts, labels):
+            if label_sample_counts[label] < min_count:
+                balanced_texts.append(text)
+                balanced_labels.append(label)
+                label_sample_counts[label] += 1
+        
+        logger.info("Balanced label distribution", counts=dict(label_sample_counts))
+        return balanced_texts, balanced_labels
+    
+    async def train_all_models(self, training_data: pd.DataFrame, symbols: List[str]) -> Dict[str, Any]:
         """Train all configured models"""
         logger.info("Starting model training")
+        
+        # Load text data for sentiment analysis if FinBERT training is enabled
+        text_data = None
+        if ('finbert' in self.command_args.get('models_to_train', []) or 
+            self.training_pipeline.config.train_finbert):
+            logger.info("Loading text data for FinBERT training...")
+            text_data = await self.load_text_data(symbols, days=30)
+            
+            if text_data:
+                logger.info("Text data loaded successfully", 
+                           samples=text_data['total_samples'],
+                           distribution=text_data['label_distribution'])
+            else:
+                logger.warning("No text data available for FinBERT training - skipping FinBERT model")
         
         # Train models using the pipeline
         trained_models = self.training_pipeline.train_all_models(
             price_data=training_data,
-            text_data=None  # TODO: Add sentiment data if available
+            text_data=text_data
         )
         
         # Save models with proper metadata
@@ -293,7 +523,7 @@ def parse_args():
         '--models', '-m',
         type=str,
         help='Comma-separated list of models to train (lstm,cnn,xgboost,finbert,ensemble,all)',
-        default='lstm,xgboost,ensemble'
+        default='all'
     )
     
     parser.add_argument(
@@ -327,7 +557,7 @@ def parse_args():
         '--output-dir', '-o',
         type=str,
         help='Output directory for saved models',
-        default='model_registry'
+        default='models'
     )
     
     parser.add_argument(
@@ -442,7 +672,7 @@ async def main():
         
         # Train models
         logger.info("Starting model training", models=models_to_train)
-        results = await trainer.train_all_models(training_data)
+        results = await trainer.train_all_models(training_data, symbols)
         
         # Clean up old models if requested
         if args.cleanup:

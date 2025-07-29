@@ -314,7 +314,7 @@ class FinBERT(ClassificationModel):
             weight_decay=self.config.weight_decay,
             logging_dir=str(self.config.save_path / "logs"),
             logging_steps=10,
-            evaluation_strategy="epoch" if eval_dataset else "no",
+            eval_strategy="epoch" if eval_dataset else "no",
             save_strategy="epoch",
             load_best_model_at_end=True if eval_dataset else False,
             metric_for_best_model="f1" if eval_dataset else None,

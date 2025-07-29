@@ -38,9 +38,9 @@ class ModelConfig:
     # Training parameters
     batch_size: int = 32
     epochs: int = 100
-    learning_rate: float = 0.001
+    learning_rate: float = 0.0001  # Lower learning rate
     validation_split: float = 0.2
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 15  # More patience
     
     # Model parameters
     input_features: List[str] = field(default_factory=list)

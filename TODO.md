@@ -103,7 +103,7 @@ You are to execute the following tasks in the specified order. Do not proceed to
     *   **Task:** Fix the data loading logic in the `load_training_data` method.
     *   **Action:** Do not concatenate different timeframes. Fetch the highest resolution data required (e.g., '1Hour') and then resample it to create the '1Day' view. This ensures temporal consistency. The output should be a single, clean DataFrame with a consistent frequency.
 
-*   **TODO 2.2: Integrate Real Sentiment Data into Training**
+*   **TODO 2.2: Integrate Real Sentiment Data into Training** 
     *   **File(s) to Modify:** `src/train_models.py`, `src/training/training_pipeline.py`
     *   **Task:** Provide real text data for training the `FinBERT` model.
     *   **Action:**
@@ -183,3 +183,89 @@ You are to execute the following tasks in the specified order. Do not proceed to
     *   **Action:** Add docstrings to all new and refactored methods explaining the logic, inputs, and outputs to ensure system maintainability.
 
 Execute these directives. The successful completion of this plan will transition the QuantumSentiment bot from a non-viable prototype into a logically sound and functional trading system ready for rigorous backtesting and deployment.
+
+***
+
+### **Amended Section of the Refactoring Mandate**
+
+## 2. System Architecture and Logic Flow Analysis (Addendum)
+
+### 2.4. `main.py` - The `BACKTEST` Mode: A Critical Misnomer
+
+The current implementation of the `BACKTEST` mode is dangerously misleading. It does not perform a historical simulation. Instead, it runs the **live trading logic** in a fast loop.
+
+**Critical Flaws of the Current `BACKTEST` Mode:**
+
+1.  **Uses Live Data:** It calls the `AlpacaBroker` to fetch *current* market data. A backtest must operate exclusively on a historical, static dataset to ensure reproducibility and prevent lookahead bias.
+2.  **No Time Simulation:** It does not iterate through historical data bar-by-bar. It simply queries for the latest data repeatedly, meaning a 1-year "backtest" would finish in minutes and only test against the most recent market conditions.
+3.  **No Simulated Execution:** It attempts to execute trades against the live/paper broker. A backtest requires a simulated broker that fills orders based on historical prices (e.g., next bar's open), calculates slippage, and applies commissions.
+4.  **Invalid Performance Metrics:** Any performance metrics would be based on the paper trading account's P&L, not on the performance of the strategy against the historical dataset.
+
+This functionality must be completely replaced.
+
+## 3. The Refactoring Mandate: A Comprehensive TODO List (Updated)
+
+The original Phases 1 through 5 remain critical and must be completed first. After the core system is logically sound, we will add a new phase to build the backtesting engine.
+
+**(Phases 1-5 remain as previously detailed)**
+
+---
+
+### **Phase 6: Implementing a True Backtesting Engine**
+
+*This phase will replace the flawed `BACKTEST` mode with a proper historical simulation engine. This allows for robust strategy validation without risking capital or relying on live market conditions.*
+
+*   **TODO 6.1: Create a Backtesting Orchestrator (`backtest.py`)**
+    *   **File(s) to Create:** `src/backtesting/backtest_runner.py` (or a new top-level `backtest.py`)
+    *   **Task:** This script will be the entry point for running backtests. It should not be part of `main.py`.
+    *   **Action:**
+        1.  The script should accept arguments for the backtest, such as `symbol(s)`, `start_date`, `end_date`, and the `config` file.
+        2.  It will use the `DataFetcher` to load the complete historical dataset for the specified period from the database.
+        3.  It will instantiate a `SimulatedBroker` (see next TODO).
+        4.  It will instantiate the `QuantumSentimentBot` in `BACKTEST` mode, but with the `SimulatedBroker` injected instead of the `AlpacaBroker`.
+        5.  It will contain the main backtesting loop that feeds historical data bar-by-bar to the bot.
+
+*   **TODO 6.2: Implement a `SimulatedBroker`**
+    *   **File(s) to Create:** `src/backtesting/simulated_broker.py`
+    *   **Task:** Create a mock broker class that simulates the behavior of the `AlpacaBroker` but operates on a historical dataset.
+    *   **Action:**
+        1.  The class should have the same method signatures as `AlpacaBroker` (`get_bars`, `submit_order`, `get_account`, `get_positions`, `is_market_open`, etc.).
+        2.  It will be initialized with the full historical DataFrame.
+        3.  `get_bars` and `get_latest_quote` will not make API calls. Instead, they will return slices of the historical DataFrame based on the current simulation time.
+        4.  `submit_order` will not send orders to an API. It will simulate a fill based on a defined rule (e.g., filled at the next bar's open price) and record the transaction. It should also simulate slippage and commissions.
+        5.  `get_account` and `get_positions` will return the state of the *simulated* portfolio, tracking equity, cash, and open positions based on the simulated trades.
+
+*   **TODO 6.3: Refactor `QuantumSentimentBot` for Broker Injection**
+    *   **File(s) to Modify:** `src/main.py`
+    *   **Task:** Modify the bot's initialization to allow either a live or simulated broker to be used. This is a key step for making the code testable.
+    *   **Action:**
+        1.  Change the `__init__` or `initialize` method to accept an optional `broker` object.
+        2.  If a broker object is provided, use it.
+        3.  If no broker is provided, then proceed with the current logic of initializing `AlpacaBroker` based on the mode. This makes the existing `main.py` functionality for live/paper trading still work.
+
+*   **TODO 6.4: Develop a Backtest Performance Reporting Module**
+    *   **File(s) to Create:** `src/backtesting/performance_report.py`
+    *   **Task:** After a backtest run is complete, this module will analyze the list of simulated trades to generate performance statistics.
+    *   **Action:**
+        1.  The module should take the final simulated account state and the history of trades as input.
+        2.  It must calculate key performance indicators (KPIs) like: Total Return, Max Drawdown, Sharpe Ratio, Sortino Ratio, Win Rate, Profit Factor, etc.
+        3.  It should generate visualizations, such as an equity curve plot.
+
+*   **TODO 6.5: Refactor the Main Trading Loop for Event-Driven Backtesting**
+    *   **File(s) to Modify:** `src/main.py`, `src/backtesting/backtest_runner.py`
+    *   **Task:** Remove the `asyncio.sleep` based loop and adapt it for bar-by-bar processing.
+    *   **Action:**
+        1.  The `_trading_cycle` in `QuantumSentimentBot` should be refactored to accept the *current bar's data* as an argument.
+        2.  The `backtest_runner.py` script will be responsible for the main loop. It will iterate through each row (timestamp) of the historical dataset and call the bot's `_trading_cycle` for each one, passing the data for that specific point in time.
+        3.  This **completely eliminates lookahead bias** and removes the need for `asyncio.sleep` in backtesting mode. The `run` method in `main.py` will now only contain the loop for live/paper trading.
+
+## 4. Final, Corrected Phased Plan
+
+With this addendum, the complete and logical refactoring plan is as follows:
+
+1.  **Phase 1: Foundational Fixes & Unification** (Unify configuration)
+2.  **Phase 2: Building a Functional Training Pipeline** (Fix data loading & sentiment integration)
+3.  **Phase 3: Creating a Logic-Driven Main Trading Pipeline** (Remove mock data, load real models, integrate real sentiment)
+4.  **Phase 4: Activating Advanced Execution and Risk Modules** (Integrate `PositionSizer` and `RiskEngine`)
+5.  **Phase 5: Final System Review and Validation** (End-to-end dry run of the live/paper system)
+6.  **Phase 6: Implementing a True Backtesting Engine** (Build the simulation framework as detailed above)

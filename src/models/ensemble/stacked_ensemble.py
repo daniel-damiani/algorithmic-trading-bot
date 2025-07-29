@@ -140,6 +140,7 @@ class StackedEnsemble(EnsembleModel):
         
         predictions = {}
         probabilities = {}
+        n_samples = None  # Track consistent sample size
         
         # Handle different data formats for different models
         if isinstance(data, dict):
@@ -149,6 +150,18 @@ class StackedEnsemble(EnsembleModel):
             # Same data for all models
             model_data = {model_name: data for model_name in models.keys()}
         
+        # Determine the sample size first
+        if isinstance(data, pd.DataFrame):
+            n_samples = len(data)
+        elif isinstance(data, dict) and data:
+            first_data = next(iter(data.values()))
+            n_samples = len(first_data) if hasattr(first_data, '__len__') else 1
+        elif model_data:
+            first_data = next(iter(model_data.values()))
+            n_samples = len(first_data) if hasattr(first_data, '__len__') else 1
+        else:
+            n_samples = 1
+        
         # Get predictions from each model
         for model_name, model in models.items():
             try:
@@ -157,6 +170,19 @@ class StackedEnsemble(EnsembleModel):
                 # Get predictions
                 if hasattr(model, 'predict'):
                     preds = model.predict(model_input)
+                    # Ensure predictions are 1D
+                    if len(preds.shape) > 1:
+                        if preds.shape[1] == 1:
+                            preds = preds.squeeze()
+                        else:
+                            # For multi-output, take the first output or argmax
+                            preds = np.argmax(preds, axis=1) if preds.shape[1] > 1 else preds[:, 0]
+                    
+                    # Ensure correct length
+                    if len(preds) != n_samples:
+                        logger.warning(f"Prediction length mismatch for {model_name}: expected {n_samples}, got {len(preds)}")
+                        preds = np.resize(preds, n_samples)
+                    
                     predictions[f'{model_name}_pred'] = preds
                 
                 # Get probabilities if available and requested
@@ -165,17 +191,18 @@ class StackedEnsemble(EnsembleModel):
                     # Store probabilities for each class
                     if len(proba.shape) > 1:
                         for i in range(proba.shape[1]):
-                            probabilities[f'{model_name}_proba_class_{i}'] = proba[:, i]
+                            prob_col = proba[:, i]
+                            if len(prob_col) != n_samples:
+                                prob_col = np.resize(prob_col, n_samples)
+                            probabilities[f'{model_name}_proba_class_{i}'] = prob_col
                     else:
+                        if len(proba) != n_samples:
+                            proba = np.resize(proba, n_samples)
                         probabilities[f'{model_name}_proba'] = proba
                 
             except Exception as e:
                 logger.error(f"Error getting predictions from {model_name}", error=str(e))
-                # Use fallback predictions
-                if isinstance(data, pd.DataFrame):
-                    n_samples = len(data)
-                else:
-                    n_samples = len(next(iter(model_data.values())))
+                # Use fallback predictions with consistent size
                 predictions[f'{model_name}_pred'] = np.zeros(n_samples)
                 if return_proba:
                     probabilities[f'{model_name}_proba'] = np.ones(n_samples) * 0.5
@@ -269,6 +296,11 @@ class StackedEnsemble(EnsembleModel):
             original_features
         )
         
+        # Ensure all features are numeric
+        for col in meta_features_train.columns:
+            meta_features_train[col] = pd.to_numeric(meta_features_train[col], errors='coerce')
+        meta_features_train = meta_features_train.fillna(0)
+        
         # Store feature columns
         self.feature_columns = meta_features_train.columns.tolist()
         
@@ -287,6 +319,11 @@ class StackedEnsemble(EnsembleModel):
                 original_features_val
             )
             
+            # Ensure validation features are also numeric
+            for col in meta_features_val.columns:
+                meta_features_val[col] = pd.to_numeric(meta_features_val[col], errors='coerce')
+            meta_features_val = meta_features_val.fillna(0)
+            
             # Ensure same features
             meta_features_val = meta_features_val[self.feature_columns]
         
@@ -303,12 +340,21 @@ class StackedEnsemble(EnsembleModel):
             if validation_data and hasattr(self.meta_learner, 'set_params'):
                 # For XGBoost, use validation set
                 if isinstance(self.meta_learner, (xgb.XGBClassifier, xgb.XGBRegressor)):
-                    self.meta_learner.fit(
-                        meta_features_train, train_labels,
-                        eval_set=[(meta_features_val, val_labels)],
-                        early_stopping_rounds=20,
-                        verbose=False
-                    )
+                    try:
+                        # Try new XGBoost API first
+                        self.meta_learner.fit(
+                            meta_features_train, train_labels,
+                            eval_set=[(meta_features_val, val_labels)],
+                            verbose=False
+                        )
+                    except TypeError:
+                        # Fallback for older XGBoost versions
+                        self.meta_learner.fit(
+                            meta_features_train, train_labels,
+                            eval_set=[(meta_features_val, val_labels)],
+                            early_stopping_rounds=20,
+                            verbose=False
+                        )
                 else:
                     self.meta_learner.fit(meta_features_train, train_labels)
             else:

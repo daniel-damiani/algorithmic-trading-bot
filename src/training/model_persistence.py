@@ -120,7 +120,7 @@ class PersistenceConfig:
     """Configuration for model persistence"""
     
     # Storage configuration
-    model_registry_path: Path = field(default_factory=lambda: Path("model_registry"))
+    model_registry_path: Path = field(default_factory=lambda: Path("models"))
     compression: bool = True
     backup_models: bool = True
     max_versions_per_model: int = 5
