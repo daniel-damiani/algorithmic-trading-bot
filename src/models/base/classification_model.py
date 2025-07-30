@@ -285,12 +285,28 @@ class ClassificationModel(BaseModel):
         metrics['confusion_matrix'] = cm.tolist()
         
         # Get classification report
-        report = classification_report(
-            y_true, y_pred, 
-            target_names=self.config.class_names,
-            output_dict=True
-        )
-        metrics['classification_report'] = report
+        try:
+            # Get unique classes in predictions and true labels
+            unique_classes = np.unique(np.concatenate([y_true, y_pred]))
+            
+            # Only use class names for classes that actually exist
+            if self.config.class_names:
+                actual_class_names = [self.config.class_names[i] for i in unique_classes 
+                                     if i < len(self.config.class_names)]
+            else:
+                actual_class_names = None
+            
+            report = classification_report(
+                y_true, y_pred, 
+                target_names=actual_class_names,
+                labels=unique_classes,
+                output_dict=True,
+                zero_division=0
+            )
+            metrics['classification_report'] = report
+        except Exception as e:
+            logger.warning(f"Could not generate classification report: {e}")
+            metrics['classification_report'] = None
         
         # Store in metadata
         self.metadata['validation_metrics'] = metrics

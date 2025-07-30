@@ -15,6 +15,7 @@ import joblib
 import json
 from pathlib import Path
 import structlog
+import torch
 
 logger = structlog.get_logger(__name__)
 
@@ -30,41 +31,110 @@ class ModelType(Enum):
 
 @dataclass
 class ModelConfig:
-    """Base configuration for all models"""
+    """Base configuration for all models - ENHANCED FOR MAXIMUM PERFORMANCE"""
     name: str = ""
-    version: str = "1.0.0"
+    version: str = "2.0.0"  # Major version bump for enhancements
     model_type: ModelType = ModelType.PRICE_PREDICTION
     
-    # Training parameters
-    batch_size: int = 32
-    epochs: int = 100
-    learning_rate: float = 0.0001  # Lower learning rate
-    validation_split: float = 0.2
-    early_stopping_patience: int = 15  # More patience
+    # Enhanced training parameters
+    batch_size: int = 8  # Smaller for better gradients
+    epochs: int = 500  # Much more training
+    learning_rate: float = 0.00005  # Even lower for stability
+    validation_split: float = 0.15  # Less validation, more training
+    early_stopping_patience: int = 100  # Much more patience
+    
+    # Advanced training techniques
+    gradient_accumulation_steps: int = 8  # Effective batch size of 64
+    warmup_epochs: int = 25  # Gradual warmup
+    use_mixed_precision: bool = True  # FP16 training
+    use_gradient_checkpointing: bool = True  # Memory efficiency
+    
+    # Learning rate scheduling
+    use_cosine_schedule: bool = True
+    cosine_restarts: int = 3  # Number of restarts
+    schedule_eta_min: float = 1e-7  # Minimum LR
     
     # Model parameters
     input_features: List[str] = field(default_factory=list)
     output_features: List[str] = field(default_factory=list)
-    lookback_period: int = 60  # For time series models
-    prediction_horizon: int = 1  # Steps ahead to predict
+    lookback_period: int = 168  # 1 week for time series
+    prediction_horizon: int = 24  # 24 hours ahead
     
-    # Hardware settings
-    device: str = "cpu"  # "cpu" or "cuda"
-    num_workers: int = 4
+    # Enhanced hardware settings
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    num_workers: int = 8  # More parallel workers
+    pin_memory: bool = True  # Faster GPU transfer
+    prefetch_factor: int = 4  # Prefetch batches
+    persistent_workers: bool = True  # Keep workers alive
     random_seed: int = 42
     
-    # Persistence
+    # Model compilation and optimization
+    compile_model: bool = True  # PyTorch 2.0 compilation
+    compile_mode: str = "default"  # "default", "reduce-overhead", "max-autotune"
+    use_channels_last: bool = True  # Memory layout optimization
+    
+    # Persistence and checkpointing
     save_path: Path = Path("models/saved")
-    checkpoint_interval: int = 10  # Save every N epochs
+    checkpoint_interval: int = 25  # More frequent checkpointing
+    save_best_only: bool = False  # Save all improvements
+    save_optimizer_state: bool = True  # Save optimizer for resuming
     
-    # Feature parameters
-    feature_importance_threshold: float = 0.01
-    max_features: Optional[int] = None
+    # Advanced feature selection
+    feature_importance_threshold: float = 0.001  # Lower threshold
+    max_features: Optional[int] = 1000  # Allow more features
+    use_feature_selection: bool = True
+    feature_selection_method: str = "mutual_info"  # Mutual information
+    feature_selection_k: int = 500  # Top K features
     
-    # Regularization
-    dropout_rate: float = 0.2
-    l1_regularization: float = 0.0
-    l2_regularization: float = 0.01
+    # Enhanced regularization
+    dropout_rate: float = 0.3  # Higher dropout
+    l1_regularization: float = 1e-5  # L1 regularization
+    l2_regularization: float = 1e-4  # Stronger L2
+    weight_decay: float = 0.01  # AdamW weight decay
+    
+    # Advanced regularization techniques
+    use_spectral_norm: bool = True  # Spectral normalization
+    use_batch_norm: bool = True  # Batch normalization
+    use_layer_norm: bool = True  # Layer normalization
+    use_instance_norm: bool = False  # Instance normalization
+    
+    # Gradient clipping
+    gradient_clip_norm: float = 1.0  # Gradient clipping
+    gradient_clip_value: Optional[float] = None  # Value clipping
+    
+    # Data augmentation
+    use_data_augmentation: bool = True
+    augmentation_strength: float = 0.1  # Augmentation intensity
+    
+    # Uncertainty quantification
+    use_uncertainty: bool = True
+    uncertainty_method: str = "mc_dropout"  # Monte Carlo dropout
+    mc_samples: int = 100  # Samples for MC estimation
+    
+    # Multi-objective optimization
+    use_multi_objective: bool = True
+    objectives: List[str] = field(default_factory=lambda: ["accuracy", "sharpe_ratio"])
+    objective_weights: List[float] = field(default_factory=lambda: [0.7, 0.3])
+    
+    # Hyperparameter optimization
+    use_hyperopt: bool = True
+    hyperopt_trials: int = 100  # Hyperparameter search trials
+    hyperopt_algorithm: str = "tpe"  # Tree-structured Parzen Estimator
+    
+    # Ensemble settings
+    use_ensemble: bool = True
+    ensemble_size: int = 5  # Number of models in ensemble
+    ensemble_method: str = "bagging"  # "bagging", "boosting", "stacking"
+    
+    # Monitoring and logging
+    use_wandb: bool = True  # Weights & Biases logging
+    log_interval: int = 10  # Log every N batches
+    validate_interval: int = 1  # Validate every N epochs
+    
+    # Production optimizations
+    use_torchscript: bool = True  # TorchScript compilation
+    use_onnx_export: bool = True  # ONNX export for deployment
+    quantization: str = "dynamic"  # "none", "dynamic", "static"
     
     def __post_init__(self):
         """Initialize after dataclass creation"""

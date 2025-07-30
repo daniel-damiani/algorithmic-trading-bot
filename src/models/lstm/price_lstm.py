@@ -24,40 +24,108 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class PriceLSTMConfig(TimeSeriesConfig):
-    """Configuration for Price LSTM model"""
+    """Configuration for Price LSTM model - ADAPTIVE & ROBUST"""
     
-    # LSTM architecture
-    lstm_layers: int = 3  # Increased depth
-    lstm_hidden_size: int = 256  # Larger hidden size
-    lstm_dropout: float = 0.3  # More dropout
+    # Adaptive LSTM architecture - will scale based on data
+    lstm_layers: int = 2  # Start with 2 layers, increase with more data
+    lstm_hidden_size: int = 128  # Moderate hidden state
+    lstm_dropout: float = 0.2  # Conservative dropout
     
-    # Attention mechanism
-    use_attention: bool = True
-    attention_heads: int = 8  # More attention heads
+    # Override parent class to disable duplicate feature engineering
+    # when using UniversalFeatureGenerator
+    use_external_features: bool = True  # Set to True when using UniversalFeatureGenerator
     
-    # Additional layers
-    fc_layers: List[int] = None
-    fc_dropout: float = 0.4  # More dropout in FC layers
+    # Multi-scale LSTM processing
+    use_multiscale: bool = False  # Disabled by default
+    scales: List[int] = None  # Will default to [1]
+    scale_fusion_method: str = "concat"  # Simple concatenation
     
-    # Training parameters
-    optimizer: str = "adam"  # "adam", "sgd", "rmsprop"
-    weight_decay: float = 1e-4  # More regularization
-    gradient_clip: float = 0.5  # Stricter gradient clipping
+    # Attention mechanism (optional)
+    use_attention: bool = False  # Disabled by default for small data
+    attention_heads: int = 4  # Fewer attention heads
+    attention_layers: int = 1  # Single attention layer
+    attention_dropout: float = 0.1
+    use_self_attention: bool = False
+    use_cross_attention: bool = False
     
-    # Learning rate schedule
+    # Residual connections and normalization
+    use_residual_connections: bool = False  # Disabled for simplicity
+    use_layer_norm: bool = True
+    use_batch_norm: bool = False  # Can cause issues with small batches
+    layer_norm_eps: float = 1e-6
+    
+    # FC layers
+    fc_layers: List[int] = None  # Will default to simple network
+    fc_dropout: float = 0.2
+    use_highway_connections: bool = False  # Disabled for simplicity
+    
+    # Advanced training parameters
+    optimizer: str = "adamw"  # AdamW optimizer
+    weight_decay: float = 0.01  # Stronger regularization
+    gradient_clip: float = 0.5
+    gradient_accumulation_steps: int = 4  # Effective larger batch
+    
+    # Sophisticated learning rate scheduling
     use_scheduler: bool = True
-    scheduler_type: str = "cosine"  # "cosine", "step", "exponential"
-    scheduler_patience: int = 5
+    scheduler_type: str = "cosine"  # Keep supported scheduler type
+    max_lr: float = 0.01  # Maximum learning rate for one-cycle
+    warmup_epochs: int = 20
+    scheduler_patience: int = 25
+    cosine_restarts: bool = True  # Cosine annealing with restarts
     
-    # Batch normalization
-    use_batch_norm: bool = True
+    # Regularization techniques
+    use_mixup: bool = False  # Disabled for stability
+    mixup_alpha: float = 0.2
+    use_cutmix: bool = False  # Disabled for stability
+    cutmix_alpha: float = 0.3
+    use_label_smoothing: bool = False
+    label_smoothing: float = 0.1
+    
+    # Stochastic depth for regularization
+    use_stochastic_depth: bool = False
+    stochastic_depth_prob: float = 0.1
+    
+    # Loss function
+    loss_type: str = "mse"  # Simple MSE loss
+    huber_delta: float = 1.0
+    use_focal_loss: bool = False
+    focal_alpha: float = 0.25
+    focal_gamma: float = 2.0
+    
+    # Multi-task learning
+    use_auxiliary_tasks: bool = False
+    aux_task_weight: float = 0.3
+    
+    # Advanced features for financial time series
+    use_temporal_convolution: bool = False
+    tcn_kernel_size: int = 3
+    tcn_dilation_base: int = 2
+    
+    # Uncertainty quantification
+    use_monte_carlo_dropout: bool = False
+    mc_samples: int = 10
+    use_bayesian_layers: bool = False
+    
+    # Meta-learning capabilities
+    use_meta_learning: bool = False
+    meta_lr: float = 0.001
+    meta_steps: int = 5
     
     def __post_init__(self):
         super().__post_init__()
         if self.fc_layers is None:
-            self.fc_layers = [128, 64, 32]  # Deeper FC network
+            self.fc_layers = [64, 32]  # Simple FC network
+        if self.scales is None:
+            self.scales = [1]  # Single scale by default
         self.model_type = ModelType.PRICE_PREDICTION
         self.name = "PriceLSTM"
+        
+        # Disable duplicate feature engineering when using external features
+        if self.use_external_features:
+            self.add_lag_features = False
+            self.add_time_features = False
+            self.add_rolling_features = False
+            logger.info("Disabled internal feature engineering (using external features)")
 
 
 class AttentionLayer(nn.Module):
@@ -206,17 +274,58 @@ class PriceLSTM(TimeSeriesModel):
         self.loss_fn = nn.MSELoss()
         
     def build_model(self) -> PriceLSTMNetwork:
-        """Build the LSTM model"""
+        """Build the LSTM model with adaptive architecture"""
         if not self.feature_columns:
             raise ValueError("Must prepare data before building model to know input size")
         
         input_size = len(self.feature_columns)
+        
+        # Adapt architecture based on feature count and data size
+        if hasattr(self, 'training_samples') and self.training_samples > 0:
+            # Scale architecture based on data availability
+            if self.training_samples < 1000:
+                # Very small data - minimal architecture
+                self.config.lstm_layers = 1
+                self.config.lstm_hidden_size = 32
+                self.config.fc_layers = [16]
+                self.config.use_attention = False
+                logger.info("Using minimal architecture for small dataset")
+            elif self.training_samples < 5000:
+                # Small data - simple architecture
+                self.config.lstm_layers = 2
+                self.config.lstm_hidden_size = 64
+                self.config.fc_layers = [32, 16]
+                self.config.use_attention = False
+                logger.info("Using simple architecture for small dataset")
+            elif self.training_samples < 20000:
+                # Medium data - moderate architecture
+                self.config.lstm_layers = 2
+                self.config.lstm_hidden_size = 128
+                self.config.fc_layers = [64, 32]
+                self.config.use_attention = True
+                self.config.attention_heads = 4
+                logger.info("Using moderate architecture for medium dataset")
+            else:
+                # Large data - full architecture
+                self.config.lstm_layers = 3
+                self.config.lstm_hidden_size = 256
+                self.config.fc_layers = [128, 64, 32]
+                self.config.use_attention = True
+                self.config.attention_heads = 8
+                logger.info("Using full architecture for large dataset")
+        
         self.model = PriceLSTMNetwork(self.config, input_size)
         self.model.to(self.device)
         
         # Initialize optimizer
         if self.config.optimizer == "adam":
             self.optimizer = optim.Adam(
+                self.model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay
+            )
+        elif self.config.optimizer == "adamw":
+            self.optimizer = optim.AdamW(
                 self.model.parameters(),
                 lr=self.config.learning_rate,
                 weight_decay=self.config.weight_decay
@@ -230,6 +339,14 @@ class PriceLSTM(TimeSeriesModel):
             )
         elif self.config.optimizer == "rmsprop":
             self.optimizer = optim.RMSprop(
+                self.model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay
+            )
+        else:
+            # Default to Adam if unknown optimizer
+            logger.warning(f"Unknown optimizer {self.config.optimizer}, defaulting to Adam")
+            self.optimizer = optim.Adam(
                 self.model.parameters(),
                 lr=self.config.learning_rate,
                 weight_decay=self.config.weight_decay
@@ -277,28 +394,35 @@ class PriceLSTM(TimeSeriesModel):
         # Prepare data first to get feature dimensions
         X_train, y_train = self.prepare_data(train_data, train_labels, is_training=True)
         
+        # Track training samples for adaptive architecture
+        self.training_samples = len(X_train)
+        
+        logger.info(f"Training data prepared: sequences={X_train.shape}, features={X_train.shape[-1]}, feature_columns={len(self.feature_columns)}")
+        
         # Build model after data preparation (so we know input size)
         if self.model is None:
             self.build_model()
         else:
-            # Check if input size changed
+            # Verify input size matches
             expected_size = self.model.lstm.input_size
             actual_size = X_train.shape[-1]
             if expected_size != actual_size:
-                logger.warning(f"Input size changed from {expected_size} to {actual_size}, rebuilding model")
-                self.model = None
-                self.optimizer = None
-                self.scheduler = None
-                self.build_model()
+                logger.error(f"Input size mismatch: expected {expected_size}, got {actual_size}")
+                logger.error(f"Feature columns: {len(self.feature_columns)}")
+                logger.error(f"This indicates a bug in feature generation consistency")
+                raise ValueError(f"Input size mismatch: expected {expected_size}, got {actual_size}. "
+                               "This should not happen with proper feature tracking.")
         
         # Prepare validation data
         X_val, y_val = None, None
         if validation_data:
+            logger.info("Preparing validation data...")
             X_val, y_val = self.prepare_data(
                 validation_data[0], 
                 validation_data[1], 
                 is_training=False
             )
+            logger.info(f"Validation data prepared: sequences={X_val.shape}, features={X_val.shape[-1]}")
         else:
             # Create validation split
             X_train, y_train, X_val, y_val = self.create_train_val_split(

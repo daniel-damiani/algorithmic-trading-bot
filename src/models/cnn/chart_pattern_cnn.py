@@ -62,19 +62,12 @@ class ChartPatternConfig(ClassificationConfig):
             self.pool_sizes = [2, 2, 2, 2]
         if self.pattern_classes is None:
             self.pattern_classes = [
-                'no_pattern',
-                'head_shoulders',
-                'inverse_head_shoulders',
-                'ascending_triangle',
-                'descending_triangle',
-                'symmetric_triangle',
-                'bull_flag',
-                'bear_flag',
-                'double_top',
-                'double_bottom',
-                'cup_handle',
-                'wedge_rising',
-                'wedge_falling'
+                'head_shoulders', 'inverse_head_shoulders',
+                'triangle', 'flag', 'wedge',
+                'double_top', 'double_bottom',
+                'channel', 'rectangle',
+                'bull_trend', 'bear_trend',
+                'consolidation', 'breakout'
             ]
         self.n_classes = len(self.pattern_classes)
         self.class_names = self.pattern_classes
@@ -315,7 +308,7 @@ class ChartPatternCNN(ClassificationModel):
             # Moving average
             ma_channel = np.zeros((self.config.chart_height, self.config.chart_width))
             if len(prices) >= 20:
-                ma = pd.Series(prices).rolling(20).mean().fillna(method='bfill').values
+                ma = pd.Series(prices).rolling(20).mean().bfill().values
                 ma_normalized = (ma - price_min) / (price_max - price_min + 1e-8)
                 y_ma = ((1 - ma_normalized) * (self.config.chart_height - 1)).astype(int)
                 
@@ -693,12 +686,26 @@ class ChartPatternCNN(ClassificationModel):
     def predict(
         self,
         data: Union[pd.DataFrame, np.ndarray],
+        return_numeric: bool = False,
         **kwargs
     ) -> np.ndarray:
-        """Make predictions with the CNN model"""
+        """Make predictions with the CNN model
+        
+        Args:
+            data: Input data
+            return_numeric: If True, return numeric labels instead of decoded strings
+            **kwargs: Additional arguments
+            
+        Returns:
+            Predictions (numeric or string labels based on return_numeric)
+        """
         
         if not self.is_trained:
             raise ValueError("Model must be trained before prediction")
+        
+        # Check for return_numeric in kwargs (for backward compatibility)
+        if 'return_numeric' in kwargs:
+            return_numeric = kwargs['return_numeric']
         
         # Prepare data
         X, _ = self.prepare_data(data, labels=None, is_training=False)
@@ -720,8 +727,8 @@ class ChartPatternCNN(ClassificationModel):
         
         predictions = np.array(predictions)
         
-        # Decode labels if needed
-        if hasattr(self.label_encoder, 'classes_'):
+        # Decode labels if needed and not returning numeric
+        if not return_numeric and hasattr(self.label_encoder, 'classes_'):
             predictions = self.decode_labels(predictions)
         
         return predictions

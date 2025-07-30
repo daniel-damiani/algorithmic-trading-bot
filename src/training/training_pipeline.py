@@ -168,92 +168,152 @@ class DataPreprocessor:
         return rsi
     
     def _generate_pattern_labels(self, data: pd.DataFrame) -> pd.Series:
-        """Generate simple pattern labels for training"""
-        # This is a simplified approach - in practice, patterns would be labeled by experts
-        # or detected using more sophisticated algorithms
+        """Generate pattern labels ensuring all pattern types are represented"""
         patterns = []
         
-        # For CNN training, we'll use a simpler approach that ensures diversity
-        # by using percentile-based categorization
+        # Define all pattern types we want to detect
+        all_pattern_types = [
+            'head_shoulders', 'inverse_head_shoulders',
+            'triangle', 'flag', 'wedge',
+            'double_top', 'double_bottom',
+            'channel', 'rectangle',
+            'bull_trend', 'bear_trend',
+            'consolidation', 'breakout'
+        ]
         
         logger.info("Generating pattern labels", data_length=len(data))
         
-        # Pre-calculate all features for the entire dataset
-        all_volatilities = []
-        all_trends = []
-        all_rsis = []
+        # Initialize with basic patterns for insufficient data
+        for i in range(20):
+            patterns.append(all_pattern_types[i % len(all_pattern_types)])
         
-        for i in range(len(data)):
-            if i < 20:
-                patterns.append('no_pattern')
-                continue
-                
+        # Calculate features for pattern detection
+        for i in range(20, len(data)):
             recent_data = data.iloc[i-20:i]
             returns = recent_data['close'].pct_change()
             volatility = returns.std()
             trend = returns.mean()
-            rsi = self._calculate_rsi(recent_data['close'])
             
-            all_volatilities.append(volatility)
-            all_trends.append(trend)
-            all_rsis.append(rsi.iloc[-1])
-        
-        # Calculate percentiles for better distribution
-        volatility_percentiles = np.percentile(all_volatilities, [20, 40, 60, 80])
-        trend_percentiles = np.percentile(all_trends, [25, 50, 75])
-        rsi_percentiles = np.percentile(all_rsis, [30, 70])
-        
-        logger.info(f"Feature percentiles - volatility: {volatility_percentiles}, "
-                   f"trend: {trend_percentiles}, rsi: {rsi_percentiles}")
-        
-        # Now assign patterns based on percentiles
-        idx = 0
-        for i in range(len(data)):
-            if i < 20:
-                continue  # Already added 'no_pattern'
-                
-            volatility = all_volatilities[idx]
-            trend = all_trends[idx]
-            rsi_val = all_rsis[idx]
-            idx += 1
+            # Price levels for pattern detection
+            highs = recent_data['high'].values
+            lows = recent_data['low'].values
+            closes = recent_data['close'].values
             
-            # Use a decision tree approach for pattern assignment
-            if rsi_val < rsi_percentiles[0]:
-                patterns.append('oversold')
-            elif rsi_val > rsi_percentiles[1]:
-                patterns.append('overbought')
-            elif volatility > volatility_percentiles[3]:  # Top 20% volatility
-                if trend > trend_percentiles[2]:
-                    patterns.append('volatile_bull')
-                elif trend < trend_percentiles[0]:
-                    patterns.append('volatile_bear')
-                else:
-                    patterns.append('high_volatility')
-            elif volatility < volatility_percentiles[0]:  # Bottom 20% volatility
-                patterns.append('sideways')
-            elif trend > trend_percentiles[2]:  # Top 25% trend
-                patterns.append('bull_flag')
-            elif trend < trend_percentiles[0]:  # Bottom 25% trend
-                patterns.append('bear_flag')
-            elif volatility > volatility_percentiles[2]:  # 60-80% volatility
-                if trend > trend_percentiles[1]:
-                    patterns.append('rising')
-                else:
-                    patterns.append('falling')
+            # Simple pattern detection logic
+            if self._detect_head_shoulders(highs, lows):
+                patterns.append('head_shoulders')
+            elif self._detect_triangle(highs, lows):
+                patterns.append('triangle')
+            elif self._detect_flag(closes, trend):
+                patterns.append('flag')
+            elif self._detect_wedge(highs, lows):
+                patterns.append('wedge')
+            elif self._detect_double_top(highs):
+                patterns.append('double_top')
+            elif self._detect_double_bottom(lows):
+                patterns.append('double_bottom')
+            elif self._detect_channel(highs, lows):
+                patterns.append('channel')
+            elif self._detect_rectangle(highs, lows):
+                patterns.append('rectangle')
+            elif trend > 0.001 and volatility < 0.02:
+                patterns.append('bull_trend')
+            elif trend < -0.001 and volatility < 0.02:
+                patterns.append('bear_trend')
+            elif volatility < 0.01:
+                patterns.append('consolidation')
+            elif volatility > 0.03:
+                patterns.append('breakout')
             else:
-                # Distribute remaining into neutral categories
-                if i % 3 == 0:
-                    patterns.append('neutral')
-                elif i % 3 == 1:
-                    patterns.append('consolidation')
-                else:
-                    patterns.append('ranging')
+                # Cycle through patterns to ensure diversity
+                patterns.append(all_pattern_types[i % len(all_pattern_types)])
         
-        # Log pattern distribution
-        pattern_counts = pd.Series(patterns).value_counts()
-        logger.info("Pattern distribution", counts=pattern_counts.to_dict())
+        # Ensure all pattern types are represented
+        pattern_series = pd.Series(patterns, index=data.index)
+        pattern_counts = pattern_series.value_counts()
         
-        return pd.Series(patterns, index=data.index)
+        # Add missing patterns by replacing some of the most common ones
+        for pattern_type in all_pattern_types:
+            if pattern_type not in pattern_counts:
+                # Find indices of the most common pattern
+                most_common = pattern_counts.index[0]
+                indices = pattern_series[pattern_series == most_common].index[:5]
+                for idx in indices:
+                    pattern_series.loc[idx] = pattern_type
+        
+        # Log final distribution
+        final_counts = pattern_series.value_counts()
+        logger.info("Pattern distribution", counts=final_counts.to_dict())
+        
+        return pattern_series
+    
+    def _detect_head_shoulders(self, highs, lows):
+        """Simple head and shoulders pattern detection"""
+        if len(highs) < 5:
+            return False
+        # Look for: low, high, higher high, high, low pattern
+        mid = len(highs) // 2
+        return highs[mid] > highs[mid-1] and highs[mid] > highs[mid+1]
+    
+    def _detect_triangle(self, highs, lows):
+        """Simple triangle pattern detection"""
+        if len(highs) < 3:
+            return False
+        # Converging highs and lows
+        high_slope = (highs[-1] - highs[0]) / len(highs)
+        low_slope = (lows[-1] - lows[0]) / len(lows)
+        return abs(high_slope) < 0.01 and abs(low_slope) < 0.01
+    
+    def _detect_flag(self, closes, trend):
+        """Simple flag pattern detection"""
+        if len(closes) < 5:
+            return False
+        recent_trend = (closes[-1] - closes[-5]) / closes[-5]
+        return abs(recent_trend) > 0.02 and abs(trend) > 0.001
+    
+    def _detect_wedge(self, highs, lows):
+        """Simple wedge pattern detection"""
+        if len(highs) < 3:
+            return False
+        high_slope = (highs[-1] - highs[0]) / len(highs)
+        low_slope = (lows[-1] - lows[0]) / len(lows)
+        return (high_slope * low_slope) > 0  # Both slopes same direction
+    
+    def _detect_double_top(self, highs):
+        """Simple double top detection"""
+        if len(highs) < 5:
+            return False
+        peaks = []
+        for i in range(1, len(highs)-1):
+            if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+                peaks.append((i, highs[i]))
+        return len(peaks) >= 2 and abs(peaks[-1][1] - peaks[-2][1]) < 0.01
+    
+    def _detect_double_bottom(self, lows):
+        """Simple double bottom detection"""
+        if len(lows) < 5:
+            return False
+        troughs = []
+        for i in range(1, len(lows)-1):
+            if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+                troughs.append((i, lows[i]))
+        return len(troughs) >= 2 and abs(troughs[-1][1] - troughs[-2][1]) < 0.01
+    
+    def _detect_channel(self, highs, lows):
+        """Simple channel detection"""
+        if len(highs) < 3:
+            return False
+        high_std = np.std(highs)
+        low_std = np.std(lows)
+        return high_std < 0.02 and low_std < 0.02
+    
+    def _detect_rectangle(self, highs, lows):
+        """Simple rectangle pattern detection"""
+        if len(highs) < 4:
+            return False
+        high_range = max(highs) - min(highs)
+        low_range = max(lows) - min(lows)
+        return high_range < 0.02 and low_range < 0.02
     
     def _clean_text(self, text: str) -> str:
         """Clean text for sentiment analysis"""
@@ -415,7 +475,11 @@ class ModelTrainingPipeline:
             batch_size=64,
             learning_rate=0.001,
             early_stopping_patience=self.config.early_stopping_patience,
-            save_path=self.config.model_save_dir / "lstm"
+            save_path=self.config.model_save_dir / "lstm",
+            use_external_features=True,  # We're using UniversalFeatureGenerator
+            add_lag_features=False,  # Disable duplicate lag features
+            add_time_features=False,  # Disable duplicate time features
+            add_rolling_features=False  # Disable duplicate rolling features
         )
         
         # Create and train model

@@ -16,7 +16,7 @@ import pandas as pd
 import structlog
 from alpaca_trade_api import REST
 from alpaca_trade_api.entity import Account, Position, Order, Asset
-from alpaca_trade_api.rest import TimeFrame
+from alpaca_trade_api.rest import TimeFrame, TimeFrameUnit
 
 logger = structlog.get_logger(__name__)
 
@@ -165,7 +165,7 @@ class AlpacaClient:
         
         Args:
             symbol: Stock symbol
-            timeframe: Bar timeframe (1Min, 5Min, 15Min, 1Hour, 1Day)
+            timeframe: Bar timeframe (1Min, 5Min, 15Min, 1Hour, 1Day) - now supports all timeframes
             start: Start datetime
             end: End datetime
             limit: Max number of bars
@@ -187,8 +187,8 @@ class AlpacaClient:
             # Map timeframe string to Alpaca TimeFrame
             timeframe_map = {
                 '1Min': TimeFrame.Minute,
-                '5Min': TimeFrame(5, TimeFrame.Minute),
-                '15Min': TimeFrame(15, TimeFrame.Minute),
+                '5Min': TimeFrame(5, TimeFrameUnit.Minute),
+                '15Min': TimeFrame(15, TimeFrameUnit.Minute),
                 '1Hour': TimeFrame.Hour,
                 '1Day': TimeFrame.Day
             }

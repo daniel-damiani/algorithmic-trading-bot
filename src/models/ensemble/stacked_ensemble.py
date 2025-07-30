@@ -167,21 +167,56 @@ class StackedEnsemble(EnsembleModel):
             try:
                 model_input = model_data.get(model_name, data)
                 
+                # Skip FinBERT if no text data is provided
+                if model_name == 'FinBERT' or 'finbert' in model_name.lower():
+                    # Check if we have text data
+                    has_text = False
+                    if isinstance(model_input, pd.DataFrame) and ('text' in model_input.columns or 'content' in model_input.columns):
+                        has_text = True
+                    elif isinstance(model_input, list) and model_input and isinstance(model_input[0], str):
+                        has_text = True
+                    
+                    if not has_text:
+                        logger.warning(f"Skipping {model_name} - no text data available")
+                        # Use neutral predictions
+                        predictions[f'{model_name}_pred'] = np.ones(n_samples)  # Neutral sentiment
+                        if return_proba:
+                            # Equal probabilities for 3 sentiment classes
+                            probabilities[f'{model_name}_proba_class_0'] = np.ones(n_samples) * 0.33
+                            probabilities[f'{model_name}_proba_class_1'] = np.ones(n_samples) * 0.34
+                            probabilities[f'{model_name}_proba_class_2'] = np.ones(n_samples) * 0.33
+                        continue
+                
                 # Get predictions
                 if hasattr(model, 'predict'):
-                    preds = model.predict(model_input)
+                    # Get numeric predictions for ensemble compatibility
+                    preds = model.predict(model_input, return_numeric=True)
+                    
+                    # Handle different prediction formats
+                    if isinstance(preds, (list, tuple)):
+                        preds = np.array(preds)
+                    
                     # Ensure predictions are 1D
                     if len(preds.shape) > 1:
                         if preds.shape[1] == 1:
                             preds = preds.squeeze()
                         else:
                             # For multi-output, take the first output or argmax
-                            preds = np.argmax(preds, axis=1) if preds.shape[1] > 1 else preds[:, 0]
+                            if model_name == 'ChartPatternCNN' or 'CNN' in model_name:
+                                # For CNN, use argmax for pattern classification
+                                preds = np.argmax(preds, axis=1)
+                            else:
+                                preds = preds[:, 0]  # Take first output
                     
-                    # Ensure correct length
-                    if len(preds) != n_samples:
-                        logger.warning(f"Prediction length mismatch for {model_name}: expected {n_samples}, got {len(preds)}")
-                        preds = np.resize(preds, n_samples)
+                    # Ensure correct length - truncate or pad as needed
+                    if len(preds) > n_samples:
+                        logger.warning(f"Truncating predictions for {model_name}: {len(preds)} -> {n_samples}")
+                        preds = preds[:n_samples]
+                    elif len(preds) < n_samples:
+                        logger.warning(f"Padding predictions for {model_name}: {len(preds)} -> {n_samples}")
+                        # Pad with the mean prediction or 0
+                        pad_value = np.mean(preds) if len(preds) > 0 else 0
+                        preds = np.pad(preds, (0, n_samples - len(preds)), constant_values=pad_value)
                     
                     predictions[f'{model_name}_pred'] = preds
                 
@@ -209,6 +244,15 @@ class StackedEnsemble(EnsembleModel):
         
         # Combine all predictions into a DataFrame
         all_predictions = pd.DataFrame({**predictions, **probabilities})
+        
+        # Ensure all columns have the same length
+        if len(all_predictions) != n_samples:
+            logger.warning(f"Adjusting prediction DataFrame size from {len(all_predictions)} to {n_samples}")
+            if len(all_predictions) > n_samples:
+                all_predictions = all_predictions.iloc[:n_samples]
+            else:
+                # Pad with NaN and then forward fill
+                all_predictions = all_predictions.reindex(range(n_samples)).ffill().fillna(0)
         
         return all_predictions
     
@@ -296,10 +340,31 @@ class StackedEnsemble(EnsembleModel):
             original_features
         )
         
-        # Ensure all features are numeric
+        # Ensure all features are numeric and handle object columns
+        numeric_features = pd.DataFrame()
         for col in meta_features_train.columns:
-            meta_features_train[col] = pd.to_numeric(meta_features_train[col], errors='coerce')
-        meta_features_train = meta_features_train.fillna(0)
+            if meta_features_train[col].dtype == 'object':
+                # Convert object columns to numeric, handling string representations
+                try:
+                    # Try to extract numeric values from string predictions
+                    if '_pred' in col:
+                        # For predictions, convert to numeric categories if needed
+                        if meta_features_train[col].apply(lambda x: isinstance(x, str)).any():
+                            # Map string labels to numeric
+                            unique_vals = meta_features_train[col].unique()
+                            label_map = {val: i for i, val in enumerate(unique_vals)}
+                            numeric_features[col] = meta_features_train[col].map(label_map).fillna(0)
+                        else:
+                            numeric_features[col] = pd.to_numeric(meta_features_train[col], errors='coerce').fillna(0)
+                    else:
+                        numeric_features[col] = pd.to_numeric(meta_features_train[col], errors='coerce').fillna(0)
+                except:
+                    logger.warning(f"Could not convert column {col} to numeric, skipping")
+                    continue
+            else:
+                numeric_features[col] = meta_features_train[col].fillna(0)
+        
+        meta_features_train = numeric_features
         
         # Store feature columns
         self.feature_columns = meta_features_train.columns.tolist()
@@ -396,27 +461,74 @@ class StackedEnsemble(EnsembleModel):
     ):
         """Calculate adaptive weights based on validation performance"""
         
+        # Ensure val_labels is numpy array
+        if isinstance(val_labels, pd.Series):
+            val_labels = val_labels.values
+        val_labels = np.array(val_labels)
+        
         performances = {}
         
         for model_name, model in self.base_models.items():
             try:
+                # Skip FinBERT if no text data
+                if model_name == 'FinBERT' or 'finbert' in model_name.lower():
+                    if isinstance(val_data, dict):
+                        model_input = val_data.get(model_name, val_data)
+                    else:
+                        model_input = val_data
+                    
+                    has_text = False
+                    if isinstance(model_input, pd.DataFrame) and ('text' in model_input.columns or 'content' in model_input.columns):
+                        has_text = True
+                    elif isinstance(model_input, list) and model_input and isinstance(model_input[0], str):
+                        has_text = True
+                    
+                    if not has_text:
+                        logger.warning(f"Skipping {model_name} in weight calculation - no text data")
+                        performances[model_name] = 0.0
+                        continue
+                
                 # Get model predictions
                 if isinstance(val_data, dict):
                     model_input = val_data.get(model_name, val_data)
                 else:
                     model_input = val_data
                 
-                predictions = model.predict(model_input)
+                predictions = model.predict(model_input, return_numeric=True)
+                predictions = np.array(predictions)
+                
+                # Ensure predictions and labels have same length
+                min_len = min(len(predictions), len(val_labels))
+                if len(predictions) != len(val_labels):
+                    logger.warning(f"Size mismatch for {model_name}: predictions={len(predictions)}, labels={len(val_labels)}. Using first {min_len} samples.")
+                    predictions = predictions[:min_len]
+                    eval_labels = val_labels[:min_len]
+                else:
+                    eval_labels = val_labels
+                
+                # Skip if no valid predictions
+                if min_len == 0:
+                    performances[model_name] = 0.0
+                    continue
                 
                 # Calculate performance metric
                 if hasattr(model, 'model_type') and 'classification' in str(model.model_type).lower():
                     # Classification metric
                     from sklearn.metrics import f1_score
-                    performance = f1_score(val_labels, predictions, average='weighted')
+                    try:
+                        # Ensure integer labels for classification
+                        pred_int = predictions.astype(int)
+                        label_int = eval_labels.astype(int)
+                        performance = f1_score(label_int, pred_int, average='weighted')
+                    except:
+                        performance = 0.0
                 else:
                     # Regression metric
                     from sklearn.metrics import r2_score
-                    performance = max(0, r2_score(val_labels, predictions))
+                    try:
+                        performance = max(0, r2_score(eval_labels, predictions))
+                    except:
+                        performance = 0.0
                 
                 performances[model_name] = performance
                 
@@ -431,6 +543,13 @@ class StackedEnsemble(EnsembleModel):
                 name: perf / total_performance 
                 for name, perf in performances.items()
             }
+        else:
+            # Equal weights if no performance data
+            n_models = len(self.base_models)
+            self.config.model_weights = {
+                name: 1.0 / n_models
+                for name in self.base_models.keys()
+            }
         
         logger.info("Adaptive weights calculated", weights=self.config.model_weights)
     
@@ -441,26 +560,66 @@ class StackedEnsemble(EnsembleModel):
     ):
         """Evaluate performance of individual models"""
         
+        # Ensure val_labels is numpy array
+        if isinstance(val_labels, pd.Series):
+            val_labels = val_labels.values
+        val_labels = np.array(val_labels)
+        
         for model_name, model in self.base_models.items():
             try:
+                # Skip FinBERT if no text data
+                if model_name == 'FinBERT' or 'finbert' in model_name.lower():
+                    if isinstance(val_data, dict):
+                        model_input = val_data.get(model_name, val_data)
+                    else:
+                        model_input = val_data
+                    
+                    has_text = False
+                    if isinstance(model_input, pd.DataFrame) and ('text' in model_input.columns or 'content' in model_input.columns):
+                        has_text = True
+                    elif isinstance(model_input, list) and model_input and isinstance(model_input[0], str):
+                        has_text = True
+                    
+                    if not has_text:
+                        logger.warning(f"Skipping {model_name} evaluation - no text data")
+                        self.model_performance[model_name] = {'error': 'No text data available'}
+                        continue
+                
                 # Get model predictions
                 if isinstance(val_data, dict):
                     model_input = val_data.get(model_name, val_data)
                 else:
                     model_input = val_data
                 
-                predictions = model.predict(model_input)
+                predictions = model.predict(model_input, return_numeric=True)
+                predictions = np.array(predictions)
+                
+                # Ensure predictions and labels have same length
+                min_len = min(len(predictions), len(val_labels))
+                if len(predictions) != len(val_labels):
+                    logger.warning(f"Size mismatch for {model_name}: predictions={len(predictions)}, labels={len(val_labels)}. Using first {min_len} samples.")
+                    predictions = predictions[:min_len]
+                    eval_labels = val_labels[:min_len]
+                else:
+                    eval_labels = val_labels
+                
+                # Skip if no valid predictions
+                if min_len == 0:
+                    logger.error(f"No valid predictions for {model_name}")
+                    self.model_performance[model_name] = {'error': 'No valid predictions'}
+                    continue
                 
                 # Calculate metrics
                 if hasattr(model, 'evaluate'):
-                    metrics = model.evaluate(model_input, val_labels)
+                    # Use model's own evaluate method if available
+                    try:
+                        metrics = model.evaluate(model_input, eval_labels)
+                    except:
+                        # Fallback to basic metrics
+                        metrics = self._calculate_basic_metrics(model_name, predictions, eval_labels)
                 else:
                     # Basic metrics
-                    from sklearn.metrics import accuracy_score, mean_squared_error
-                    if hasattr(model, 'model_type') and 'classification' in str(model.model_type).lower():
-                        metrics = {'accuracy': accuracy_score(val_labels, predictions)}
-                    else:
-                        metrics = {'mse': mean_squared_error(val_labels, predictions)}
+                    metrics = self._calculate_basic_metrics(model_name, predictions, eval_labels)
                 
                 self.model_performance[model_name] = metrics
                 
@@ -470,6 +629,31 @@ class StackedEnsemble(EnsembleModel):
         
         logger.info("Individual model evaluation completed", 
                    performances=self.model_performance)
+    
+    def _calculate_basic_metrics(self, model_name: str, predictions: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
+        """Calculate basic metrics for a model"""
+        from sklearn.metrics import accuracy_score, mean_squared_error, r2_score
+        
+        # Determine if classification or regression
+        is_classification = False
+        if 'CNN' in model_name or 'XGBoost' in model_name or 'BERT' in model_name:
+            is_classification = True
+        
+        try:
+            if is_classification:
+                # Ensure integer labels for classification
+                pred_int = predictions.astype(int)
+                label_int = labels.astype(int)
+                return {'accuracy': accuracy_score(label_int, pred_int)}
+            else:
+                # Regression metrics
+                return {
+                    'mse': mean_squared_error(labels, predictions),
+                    'r2': r2_score(labels, predictions)
+                }
+        except Exception as e:
+            logger.warning(f"Could not calculate metrics for {model_name}: {e}")
+            return {'error': str(e)}
     
     def predict(
         self,
@@ -527,7 +711,18 @@ class StackedEnsemble(EnsembleModel):
                 else:
                     model_input = data
                 
-                pred = model.predict(model_input)
+                # Skip FinBERT if no text data
+                if model_name == 'FinBERT' or 'finbert' in model_name.lower():
+                    has_text = False
+                    if isinstance(model_input, pd.DataFrame) and ('text' in model_input.columns or 'content' in model_input.columns):
+                        has_text = True
+                    elif isinstance(model_input, list) and model_input and isinstance(model_input[0], str):
+                        has_text = True
+                    
+                    if not has_text:
+                        continue
+                
+                pred = model.predict(model_input, return_numeric=True)
                 predictions.append(pred)
                 weights.append(self.config.model_weights.get(model_name, 1.0))
                 

@@ -678,12 +678,26 @@ class MarketRegimeXGBoost(ClassificationModel):
     def predict(
         self,
         data: Union[pd.DataFrame, np.ndarray],
+        return_numeric: bool = False,
         **kwargs
     ) -> np.ndarray:
-        """Make predictions with the XGBoost model"""
+        """Make predictions with the XGBoost model
+        
+        Args:
+            data: Input data
+            return_numeric: If True, return numeric labels instead of decoded strings
+            **kwargs: Additional arguments
+            
+        Returns:
+            Predictions (numeric or string labels based on return_numeric)
+        """
         
         if not self.is_trained:
             raise ValueError("Model must be trained before prediction")
+        
+        # Check for return_numeric in kwargs (for backward compatibility)
+        if 'return_numeric' in kwargs:
+            return_numeric = kwargs['return_numeric']
         
         # Prepare data
         X, _ = self.prepare_data(data, labels=None, is_training=False)
@@ -691,8 +705,11 @@ class MarketRegimeXGBoost(ClassificationModel):
         # Make predictions
         predictions = self.model.predict(X)
         
-        # Decode labels if needed
-        if hasattr(self.label_encoder, 'classes_'):
+        # Ensure predictions are integers
+        predictions = predictions.astype(int)
+        
+        # Decode labels if needed and not returning numeric
+        if not return_numeric and hasattr(self.label_encoder, 'classes_'):
             predictions = self.decode_labels(predictions)
         
         return predictions

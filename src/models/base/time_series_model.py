@@ -21,33 +21,78 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class TimeSeriesConfig(ModelConfig):
-    """Configuration specific to time series models"""
+    """Configuration specific to time series models - ADAPTIVE & ROBUST"""
     
-    # Time series specific parameters
-    sequence_length: int = 30  # Reduced from 60 for smaller datasets
-    stride: int = 1  # Step size for sliding window
-    forecast_horizon: int = 1  # Number of timesteps to predict
+    # Adaptive time series parameters - will auto-adjust based on data
+    sequence_length: int = 60  # Default 60, will adapt to data size
+    min_sequence_length: int = 20  # Minimum acceptable sequence
+    max_sequence_length: int = 168  # Maximum sequence length
+    stride: int = 1  # Keep all data points
+    forecast_horizon: int = 1  # Default single-step prediction
+    multi_horizon: bool = False  # Disabled by default for stability
+    horizons: List[int] = None  # Will default based on data
     
-    # Preprocessing
-    scaling_method: str = "standard"  # "standard", "minmax", or "none"
-    detrend: bool = False
-    handle_missing: str = "interpolate"  # "interpolate", "forward_fill", "drop"
+    # Robust preprocessing
+    scaling_method: str = "robust"  # Robust scaler for outliers
+    target_scaling_method: str = "standard"  # Separate target scaling
+    detrend: bool = False  # Disabled by default for simplicity
+    detrend_method: str = "linear"  # Linear or polynomial detrending
+    handle_missing: str = "interpolate"  # Simple interpolation
+    outlier_detection: bool = False  # Disabled by default
+    outlier_method: str = "isolation_forest"
+    outlier_contamination: float = 0.05
     
-    # Feature engineering
-    add_time_features: bool = True  # Add hour, day, month features
+    # Advanced feature engineering
+    add_time_features: bool = True
+    add_cyclical_features: bool = True  # Sine/cosine encoding
     add_technical_indicators: bool = True
-    add_lag_features: bool = False  # Disabled to avoid dimension mismatch
+    add_lag_features: bool = True  # Re-enabled with proper handling
     lag_periods: List[int] = None
+    add_rolling_features: bool = True
+    rolling_windows: List[int] = None  # Will default to multiple windows
+    add_difference_features: bool = True  # First and second differences
+    add_fourier_features: bool = True  # Fourier transform features
+    fourier_terms: int = 10
     
-    # Model architecture hints
-    hidden_size: int = 256  # Increased default
-    num_layers: int = 3  # More layers
-    bidirectional: bool = True  # Use bidirectional LSTM
+    # Cross-asset features
+    add_cross_asset_features: bool = True
+    reference_assets: List[str] = None  # SPY, VIX, etc.
+    
+    # Enhanced model architecture
+    hidden_size: int = 512  # Much larger
+    num_layers: int = 6  # Deeper
+    bidirectional: bool = True
+    
+    # Multi-scale processing
+    use_multi_scale: bool = True
+    scales: List[int] = None  # Different temporal scales
+    
+    # Advanced regularization
+    use_spectral_norm: bool = True  # Spectral normalization
+    use_gradient_penalty: bool = True  # Gradient penalty regularization
+    gradient_penalty_weight: float = 10.0
+    
+    # Curriculum learning
+    use_curriculum_learning: bool = True
+    curriculum_strategy: str = "length_based"  # Start with shorter sequences
+    min_sequence_length: int = 24  # Minimum sequence length to start
+    
+    # Test-time augmentation
+    use_tta: bool = True  # Test-time augmentation
+    tta_samples: int = 10  # Number of TTA samples
     
     def __post_init__(self):
         super().__post_init__()
         if self.lag_periods is None:
-            self.lag_periods = [1, 5, 10, 20]
+            self.lag_periods = [1, 2, 3, 5, 10]  # Conservative lags
+        if self.rolling_windows is None:
+            self.rolling_windows = [7, 14, 30]  # Standard rolling windows
+        if self.horizons is None:
+            self.horizons = [1]  # Single horizon by default
+        if self.scales is None:
+            self.scales = [1]  # Single scale by default
+        if self.reference_assets is None:
+            self.reference_assets = []  # No reference assets by default
         self.model_type = ModelType.PRICE_PREDICTION
 
 
@@ -76,7 +121,7 @@ class TimeSeriesModel(BaseModel):
         targets: Optional[np.ndarray] = None
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
-        Create sequences for time series models
+        Create sequences for time series models with adaptive sequence length
         
         Args:
             data: Input data (n_samples, n_features)
@@ -86,14 +131,30 @@ class TimeSeriesModel(BaseModel):
             Tuple of (sequences, target_sequences)
         """
         n_samples = len(data)
+        
+        # Adaptive sequence length based on data size
         seq_length = self.config.sequence_length
+        min_sequences_needed = 10  # Need at least 10 sequences for training
+        
+        # Adjust sequence length if needed
+        while seq_length > self.config.min_sequence_length:
+            n_sequences = (n_samples - seq_length - self.config.forecast_horizon + 1) // self.config.stride
+            if n_sequences >= min_sequences_needed:
+                break
+            seq_length = max(seq_length - 10, self.config.min_sequence_length)
+        
+        # Update config with adapted sequence length
+        if seq_length != self.config.sequence_length:
+            logger.info(f"Adapted sequence length from {self.config.sequence_length} to {seq_length} based on data size")
+            self.config.sequence_length = seq_length
+        
         stride = self.config.stride
         
         # Calculate number of sequences
         n_sequences = (n_samples - seq_length - self.config.forecast_horizon + 1) // stride
         
         if n_sequences <= 0:
-            raise ValueError(f"Not enough data to create sequences. Need at least {seq_length + self.config.forecast_horizon} samples")
+            raise ValueError(f"Not enough data to create sequences. Have {n_samples} samples, need at least {seq_length + self.config.forecast_horizon}")
         
         # Create sequences
         sequences = []
@@ -115,6 +176,8 @@ class TimeSeriesModel(BaseModel):
         sequences = np.array(sequences)
         if target_sequences is not None:
             target_sequences = np.array(target_sequences)
+        
+        logger.debug(f"Created {len(sequences)} sequences of length {seq_length} from {n_samples} samples")
         
         return sequences, target_sequences
     
@@ -193,41 +256,88 @@ class TimeSeriesModel(BaseModel):
         elif self.config.handle_missing == "drop":
             df = df.dropna()
         
-        # Add features if configured
-        if self.config.add_time_features and 'timestamp' in df.columns:
-            df = self.add_time_features(df)
+        # CRITICAL: Determine feature generation based on training state
+        # During training, we discover which features to use
+        # During validation/inference, we must recreate the exact same features
         
-        # Add lag features for numeric columns
-        if self.config.add_lag_features:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            df = self.add_lag_features(df, numeric_cols)
-        
-        # Drop any remaining NaN values created by lagging
-        # Keep more data by only dropping rows with NaN in critical columns
-        critical_cols = ['open', 'high', 'low', 'close', 'volume']
-        df = df.dropna(subset=[col for col in critical_cols if col in df.columns])
-        
-        # Store feature columns
         if is_training:
-            self.feature_columns = [col for col in df.columns 
-                                   if col not in ['timestamp', 'symbol']]
+            # Add features if configured
+            if self.config.add_time_features and 'timestamp' in df.columns:
+                df = self.add_time_features(df)
+            
+            # Add lag features for numeric columns
+            if self.config.add_lag_features:
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                # Store which columns we're adding lags for
+                self._lag_columns = numeric_cols
+                df = self.add_lag_features(df, numeric_cols)
+            
+            # Drop any remaining NaN values created by lagging
+            # Keep more data by only dropping rows with NaN in critical columns
+            critical_cols = ['open', 'high', 'low', 'close', 'volume']
+            df = df.dropna(subset=[col for col in critical_cols if col in df.columns])
+            
+            # Store feature columns BEFORE selecting data
+            # This ensures we capture all columns including lag features
+            all_columns = [col for col in df.columns 
+                          if col not in ['timestamp', 'symbol']]
+            logger.debug(f"Available columns after feature engineering: {len(all_columns)}")
+            self.feature_columns = all_columns
             if labels is not None:
                 if isinstance(labels, pd.Series):
                     self.target_columns = [labels.name]
                 elif isinstance(labels, pd.DataFrame):
                     self.target_columns = labels.columns.tolist()
-        
-        # Select features - ensure consistent columns
-        if is_training:
-            # During training, use all available columns
-            feature_data = df[self.feature_columns].values
+            
+            # Store the exact feature generation process
+            self._feature_generation_params = {
+                'add_time_features': self.config.add_time_features and 'timestamp' in data.columns,
+                'add_lag_features': self.config.add_lag_features,
+                'lag_columns': getattr(self, '_lag_columns', [])
+            }
         else:
-            # During validation/inference, use only columns that were available during training
-            # Fill missing columns with 0
-            missing_cols = set(self.feature_columns) - set(df.columns)
-            for col in missing_cols:
-                df[col] = 0
-            feature_data = df[self.feature_columns].values
+            # During validation/inference, recreate the same features
+            if hasattr(self, '_feature_generation_params'):
+                params = self._feature_generation_params
+                
+                # Add time features if they were added during training
+                if params.get('add_time_features', False) and 'timestamp' in df.columns:
+                    df = self.add_time_features(df)
+                
+                # Add lag features using the same columns as training
+                if params.get('add_lag_features', False) and params.get('lag_columns'):
+                    # Only add lags for columns that exist in the current data
+                    lag_cols = [col for col in params['lag_columns'] if col in df.columns]
+                    if lag_cols:
+                        df = self.add_lag_features(df, lag_cols)
+            else:
+                # Fallback: apply same logic as training
+                logger.warning("No feature generation params stored, applying default feature engineering")
+                if self.config.add_time_features and 'timestamp' in df.columns:
+                    df = self.add_time_features(df)
+                
+                if self.config.add_lag_features:
+                    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                    df = self.add_lag_features(df, numeric_cols)
+            
+            # Drop NaN values
+            critical_cols = ['open', 'high', 'low', 'close', 'volume']
+            df = df.dropna(subset=[col for col in critical_cols if col in df.columns])
+            
+            # Ensure we have exactly the same columns as training
+            # Add missing columns with 0
+            for col in self.feature_columns:
+                if col not in df.columns:
+                    df[col] = 0
+            
+            # Remove any extra columns
+            extra_cols = set(df.columns) - set(self.feature_columns) - {'timestamp', 'symbol'}
+            if extra_cols:
+                logger.warning(f"Dropping {len(extra_cols)} extra columns not present during training")
+                df = df.drop(columns=list(extra_cols))
+        
+        # Select features
+        feature_data = df[self.feature_columns].values
         
         # Scale features
         if self.scaler is not None:
@@ -259,6 +369,13 @@ class TimeSeriesModel(BaseModel):
         
         # Create sequences
         sequences, target_sequences = self.create_sequences(feature_data, labels)
+        
+        # CRITICAL: Verify feature dimensions match
+        if sequences.shape[-1] != len(self.feature_columns):
+            logger.warning(f"Feature dimension mismatch: sequences have {sequences.shape[-1]} features but feature_columns has {len(self.feature_columns)}")
+            # This is a critical error in training mode
+            if is_training:
+                raise ValueError(f"Feature dimension mismatch in training: {sequences.shape[-1]} != {len(self.feature_columns)}")
         
         logger.debug("Data prepared",
                     n_sequences=len(sequences),
@@ -331,7 +448,9 @@ class TimeSeriesModel(BaseModel):
         ts_data_path = base_path.with_suffix('.ts_data.pkl')
         joblib.dump({
             'feature_columns': self.feature_columns,
-            'target_columns': self.target_columns
+            'target_columns': self.target_columns,
+            'feature_generation_params': getattr(self, '_feature_generation_params', {}),
+            'lag_columns': getattr(self, '_lag_columns', [])
         }, ts_data_path)
         
         return base_path
@@ -357,5 +476,7 @@ class TimeSeriesModel(BaseModel):
             ts_data = joblib.load(ts_data_path)
             model_instance.feature_columns = ts_data['feature_columns']
             model_instance.target_columns = ts_data['target_columns']
+            model_instance._feature_generation_params = ts_data.get('feature_generation_params', {})
+            model_instance._lag_columns = ts_data.get('lag_columns', [])
         
         return model_instance

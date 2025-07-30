@@ -16,6 +16,13 @@ from datetime import datetime, timedelta
 from collections import Counter, defaultdict
 import pandas as pd
 import structlog
+import warnings
+
+# Suppress PRAW async warnings before importing praw
+warnings.filterwarnings("ignore", message=".*appears that you are using PRAW in an asynchronous environment.*")
+warnings.filterwarnings("ignore", message=".*strongly recommended to use Async PRAW.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="praw")
+
 import praw
 from praw.models import Submission, Comment
 
