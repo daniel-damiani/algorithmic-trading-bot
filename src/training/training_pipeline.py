@@ -340,6 +340,7 @@ class ModelTrainingPipeline:
         self.preprocessor = DataPreprocessor(config)
         self.trained_models: Dict[str, BaseModel] = {}
         self.training_results: Dict[str, Dict[str, Any]] = {}
+        self.text_data: Optional[Dict[str, Any]] = None
         
         # Set random seeds for reproducibility
         np.random.seed(config.random_seed)
@@ -353,6 +354,9 @@ class ModelTrainingPipeline:
         """Train all models in the pipeline"""
         
         logger.info("Starting model training pipeline")
+        
+        # Store text data for later use
+        self.text_data = text_data
         
         # Prepare data splits
         train_data, val_data, test_data = self._create_data_splits(price_data)
@@ -573,6 +577,52 @@ class ModelTrainingPipeline:
         
         return model, history
     
+    def _extract_text_features_for_timestamps(self, price_data: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """Extract text features aligned with price data timestamps"""
+        if not self.text_data or 'texts' not in self.text_data:
+            return None
+        
+        # For now, create synthetic text features based on available text data
+        # In a real implementation, you would:
+        # 1. Match text data timestamps with price data timestamps
+        # 2. Aggregate sentiment scores for each time period
+        # 3. Create features like: avg_sentiment, text_volume, etc.
+        
+        # Create a DataFrame with same index as price data
+        text_features = pd.DataFrame(index=price_data.index)
+        
+        # Calculate overall sentiment distribution from text data
+        labels = self.text_data.get('labels', [])
+        if labels:
+            sentiment_counts = {'positive': 0, 'neutral': 0, 'negative': 0}
+            for label in labels:
+                if label in sentiment_counts:
+                    sentiment_counts[label] += 1
+            
+            total = sum(sentiment_counts.values())
+            if total > 0:
+                # Create sentiment probability features
+                text_features['text_positive_prob'] = sentiment_counts['positive'] / total
+                text_features['text_neutral_prob'] = sentiment_counts['neutral'] / total
+                text_features['text_negative_prob'] = sentiment_counts['negative'] / total
+                text_features['text_volume'] = len(labels) / len(price_data)  # Normalized text volume
+                
+                # Add sentiment score (positive - negative)
+                text_features['text_sentiment_score'] = (
+                    text_features['text_positive_prob'] - text_features['text_negative_prob']
+                )
+            else:
+                # Default neutral features
+                text_features['text_positive_prob'] = 0.33
+                text_features['text_neutral_prob'] = 0.34
+                text_features['text_negative_prob'] = 0.33
+                text_features['text_volume'] = 0.0
+                text_features['text_sentiment_score'] = 0.0
+        else:
+            return None
+            
+        return text_features
+    
     def _train_ensemble(self, train_data: pd.DataFrame, val_data: pd.DataFrame) -> StackedEnsemble:
         """Train ensemble model using standardized features"""
         
@@ -612,6 +662,24 @@ class ModelTrainingPipeline:
             'ChartPatternCNN': self.preprocessor.feature_generator.transform_for_model(val_features, 'cnn'),
             'MarketRegimeXGBoost': self.preprocessor.feature_generator.transform_for_model(val_features, 'xgboost')
         }
+        
+        # If FinBERT is available and we have text data, extract text features
+        if 'FinBERT' in self.trained_models and self.text_data:
+            # Extract text features aligned with price data
+            train_text_features = self._extract_text_features_for_timestamps(train_data_sorted)
+            val_text_features = self._extract_text_features_for_timestamps(val_data_sorted)
+            
+            if train_text_features is not None:
+                # For FinBERT, we'll use the text features as a proxy
+                # The ensemble will use these features to understand text sentiment impact
+                train_model_data['FinBERT'] = train_text_features
+                val_model_data['FinBERT'] = val_text_features
+            else:
+                logger.warning("Could not extract text features for FinBERT in ensemble")
+                # Let the ensemble handle missing FinBERT data gracefully
+                train_model_data['FinBERT'] = pd.DataFrame(index=train_features.index)
+                val_model_data['FinBERT'] = pd.DataFrame(index=val_features.index)
+        
         
         # Create simple synthetic labels for ensemble training (binary classification)
         # In practice, you'd use actual trading signals or regime classifications
@@ -676,6 +744,14 @@ class ModelTrainingPipeline:
                         'ChartPatternCNN': self.preprocessor.feature_generator.transform_for_model(test_features, 'cnn'),
                         'MarketRegimeXGBoost': self.preprocessor.feature_generator.transform_for_model(test_features, 'xgboost')
                     }
+                    
+                    # Add FinBERT text features if available
+                    if 'FinBERT' in self.trained_models and self.text_data:
+                        test_text_features = self._extract_text_features_for_timestamps(test_data_sorted)
+                        if test_text_features is not None:
+                            test_model_data['FinBERT'] = test_text_features
+                        else:
+                            test_model_data['FinBERT'] = pd.DataFrame(index=test_features.index)
                     
                     # Create test labels (binary classification)
                     returns = test_data_sorted['close'].pct_change()

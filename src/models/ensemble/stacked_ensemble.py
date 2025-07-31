@@ -681,6 +681,14 @@ class StackedEnsemble(EnsembleModel):
             )
             
             # Ensure same features as training
+            # Handle missing columns gracefully
+            missing_cols = set(self.feature_columns) - set(meta_features.columns)
+            if missing_cols:
+                logger.warning(f"Missing columns in meta features: {missing_cols}")
+                for col in missing_cols:
+                    meta_features[col] = 0
+            
+            # Select only the columns used in training
             meta_features = meta_features[self.feature_columns].fillna(0)
             
             # Make predictions with meta-learner
@@ -775,6 +783,14 @@ class StackedEnsemble(EnsembleModel):
         )
         
         # Ensure same features as training
+        # Handle missing columns gracefully
+        missing_cols = set(self.feature_columns) - set(meta_features.columns)
+        if missing_cols:
+            logger.warning(f"Missing columns in meta features: {missing_cols}")
+            for col in missing_cols:
+                meta_features[col] = 0
+        
+        # Select only the columns used in training
         meta_features = meta_features[self.feature_columns].fillna(0)
         
         # Get probabilities
@@ -815,6 +831,68 @@ class StackedEnsemble(EnsembleModel):
                 contributions['base_predictions'][model_name] = base_pred
         
         return contributions
+    
+    def evaluate(
+        self,
+        test_data: Union[pd.DataFrame, Dict[str, Any]],
+        test_labels: Union[pd.Series, np.ndarray],
+        **kwargs
+    ) -> Dict[str, float]:
+        """Evaluate ensemble performance"""
+        # Get ensemble predictions
+        y_pred = self.predict(test_data)
+        
+        # Prepare labels
+        if isinstance(test_labels, (pd.Series, pd.DataFrame)):
+            y_true = test_labels.values
+        else:
+            y_true = test_labels
+        
+        # Ensure same length
+        min_len = min(len(y_pred), len(y_true))
+        if len(y_pred) != len(y_true):
+            logger.warning(f"Size mismatch in evaluation: predictions={len(y_pred)}, labels={len(y_true)}. Using first {min_len} samples.")
+            y_pred = y_pred[:min_len]
+            y_true = y_true[:min_len]
+        
+        # Calculate metrics based on problem type
+        from sklearn.metrics import accuracy_score, f1_score, mean_squared_error, r2_score
+        
+        # Try classification metrics first
+        try:
+            # Ensure integer labels for classification
+            y_pred_int = y_pred.astype(int)
+            y_true_int = y_true.astype(int)
+            
+            metrics = {
+                'accuracy': accuracy_score(y_true_int, y_pred_int),
+                'f1_score': f1_score(y_true_int, y_pred_int, average='weighted', zero_division=0)
+            }
+            
+            # If classification works, add more classification metrics
+            from sklearn.metrics import precision_score, recall_score
+            metrics['precision'] = precision_score(y_true_int, y_pred_int, average='weighted', zero_division=0)
+            metrics['recall'] = recall_score(y_true_int, y_pred_int, average='weighted', zero_division=0)
+            
+        except Exception as e:
+            # Fall back to regression metrics
+            try:
+                mse = mean_squared_error(y_true, y_pred)
+                metrics = {
+                    'mse': mse,
+                    'rmse': np.sqrt(mse),
+                    'mae': np.mean(np.abs(y_true - y_pred)),
+                    'r2': r2_score(y_true, y_pred)
+                }
+            except Exception as e2:
+                logger.error(f"Could not calculate metrics: {e2}")
+                metrics = {'error': str(e2)}
+        
+        # Add ensemble-specific metrics
+        if hasattr(self, 'model_performance') and self.model_performance:
+            metrics['individual_performances'] = self.model_performance
+        
+        return metrics
     
     def save(self, path: Optional[Path] = None) -> Path:
         """Save ensemble model"""

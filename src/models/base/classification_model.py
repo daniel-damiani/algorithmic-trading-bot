@@ -291,8 +291,21 @@ class ClassificationModel(BaseModel):
             
             # Only use class names for classes that actually exist
             if self.config.class_names:
-                actual_class_names = [self.config.class_names[i] for i in unique_classes 
-                                     if i < len(self.config.class_names)]
+                try:
+                    # Convert to int if possible for indexing
+                    actual_class_names = []
+                    for cls in unique_classes:
+                        try:
+                            idx = int(cls)
+                            if idx < len(self.config.class_names):
+                                actual_class_names.append(self.config.class_names[idx])
+                            else:
+                                actual_class_names.append(str(cls))
+                        except (ValueError, TypeError):
+                            # If can't convert to int, use the string representation
+                            actual_class_names.append(str(cls))
+                except Exception:
+                    actual_class_names = None
             else:
                 actual_class_names = None
             

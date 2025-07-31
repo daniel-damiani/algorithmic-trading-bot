@@ -96,40 +96,93 @@ data_sources:
     scrape_delay: 900  # 15 minutes between scrapes
     rate_limit: 1      # requests per minute
 
-# === MACHINE LEARNING ===
+bu# === MACHINE LEARNING - ADAPTIVE CONFIGURATION ===
 ml:
+  # Adaptive model settings that scale with data availability
+  adaptive_scaling: true              # Enable automatic architecture scaling
+  
   models:
     price_lstm:
       enabled: true
-      sequence_length: 48    # hours
-      forecast_horizon: 24   # hours
-      hidden_size: 128
-      num_layers: 3
+      sequence_length: 60             # Will adapt based on data (20-168)
+      forecast_horizon: 1             # Single step prediction
+      hidden_size: 128                # Will scale with data
+      num_layers: 2                   # Will scale with data
       dropout: 0.2
+      use_attention: false            # Will enable with more data
+      adaptive_architecture: true     # Enable adaptive scaling
       
     pattern_cnn:
       enabled: true
-      image_size: [64, 64]
-      patterns: ["head_shoulders", "triangle", "flag", "wedge"]
-      confidence_threshold: 0.8
+      image_size: [64, 128]           # Standard chart size
+      pattern_classes: [
+        "head_shoulders", "inverse_head_shoulders",
+        "triangle", "flag", "wedge",
+        "double_top", "double_bottom",
+        "channel", "rectangle",
+        "bull_trend", "bear_trend",
+        "consolidation", "breakout"
+      ]
+      confidence_threshold: 0.7
+      min_samples_per_class: 10       # Minimum samples needed
       
     regime_xgboost:
       enabled: true
       regimes: ["trending", "ranging", "volatile"]
       n_estimators: 100
       max_depth: 6
+      early_stopping_rounds: 20
       
     sentiment_bert:
       enabled: true
       model_name: "ProsusAI/finbert"
-      max_length: 512
-      batch_size: 16
+      max_length: 256                 # Shorter for efficiency
+      batch_size: 8                   # Smaller batch
       
   ensemble:
-    voting: "weighted"     # weighted, majority
-    meta_learner: "lightgbm"
-    rebalance_frequency: "daily"
-    min_confidence: 0.65   # minimum confidence to trade
+    # Advanced ensemble methods
+    voting: "stacked"               # Stacked generalization
+    meta_learner: "catboost"        # CatBoost as meta-learner
+    meta_features: "all"            # Use all base model features
+    
+    # Multi-level ensembling
+    ensemble_levels: 3              # 3-level ensemble hierarchy
+    level1_models: ["lstm", "transformer", "cnn"]
+    level2_models: ["xgboost", "catboost", "lightgbm"]
+    level3_models: ["linear", "ridge", "neural_net"]
+    
+    # Dynamic weighting with regime awareness
+    dynamic_weights: true
+    weight_update_frequency: "15min"  # Very frequent updates
+    performance_window: 336         # 2 weeks rolling window
+    regime_specific_weights: true   # Different weights per market regime
+    
+    # Advanced uncertainty quantification
+    quantile_regression: true
+    confidence_intervals: [0.01, 0.05, 0.1, 0.25, 0.75, 0.9, 0.95, 0.99]
+    bayesian_ensemble: true         # Bayesian model averaging
+    
+    # Multi-objective optimization with constraints
+    objectives: [
+      "accuracy", "precision", "recall", "f1", 
+      "sharpe_ratio", "sortino_ratio", "calmar_ratio",
+      "max_drawdown", "volatility", "skewness", "kurtosis"
+    ]
+    pareto_optimization: true
+    constraint_handling: "penalty"  # Handle constraint violations
+    
+    # Online learning and adaptation
+    online_learning: true
+    learning_rate_decay: 0.95       # Gradual decay
+    concept_drift_detection: true   # Detect distribution shifts
+    adaptation_threshold: 0.05      # Adaptation trigger threshold
+    
+    rebalance_frequency: "5min"     # Very frequent updates
+    min_confidence: 0.75            # Higher confidence threshold
+    
+    # Ensemble diversity enforcement
+    diversity_penalty: 0.1          # Penalty for similar predictions
+    min_diversity_threshold: 0.3    # Minimum diversity required
 
 # === FEATURE ENGINEERING ===
 features:
