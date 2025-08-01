@@ -196,7 +196,8 @@ class StackedEnsemble(EnsembleModel):
                     if isinstance(preds, (list, tuple)):
                         preds = np.array(preds)
                     
-                    # Ensure predictions are 1D
+                    # Ensure predictions are numpy array and 1D
+                    preds = np.asarray(preds)
                     if len(preds.shape) > 1:
                         if preds.shape[1] == 1:
                             preds = preds.squeeze()
@@ -207,6 +208,17 @@ class StackedEnsemble(EnsembleModel):
                                 preds = np.argmax(preds, axis=1)
                             else:
                                 preds = preds[:, 0]  # Take first output
+                    
+                    # Ensure flat array of scalar values
+                    preds = preds.flatten()
+                    
+                    # Convert any object arrays to float
+                    if preds.dtype == object:
+                        try:
+                            preds = preds.astype(float)
+                        except:
+                            # If conversion fails, extract scalar values
+                            preds = np.array([float(p) if np.isscalar(p) else float(p.flat[0]) for p in preds])
                     
                     # Ensure correct length - truncate or pad as needed
                     if len(preds) > n_samples:
@@ -272,8 +284,15 @@ class StackedEnsemble(EnsembleModel):
                 # Pairwise disagreement
                 for i, col1 in enumerate(pred_cols):
                     for col2 in pred_cols[i+1:]:
-                        disagreement = (base_predictions[col1] != base_predictions[col2]).astype(int)
-                        meta_features[f'disagree_{col1}_{col2}'] = disagreement
+                        # Ensure both columns contain scalar values
+                        try:
+                            col1_vals = pd.to_numeric(base_predictions[col1], errors='coerce').fillna(0)
+                            col2_vals = pd.to_numeric(base_predictions[col2], errors='coerce').fillna(0)
+                            disagreement = (col1_vals != col2_vals).astype(int)
+                            meta_features[f'disagree_{col1}_{col2}'] = disagreement
+                        except Exception as e:
+                            logger.warning(f"Error computing disagreement between {col1} and {col2}: {e}")
+                            meta_features[f'disagree_{col1}_{col2}'] = 0
                 
                 # Overall disagreement (standard deviation of predictions)
                 if all(base_predictions[col].dtype in [np.float32, np.float64] for col in pred_cols):

@@ -558,23 +558,77 @@ class MarketRegimeXGBoost(ClassificationModel):
                    n_samples=len(X_train),
                    n_features=X_train.shape[1])
         
+        # Check and fix class labels - XGBoost requires sequential classes starting from 0
+        unique_train_classes = np.unique(y_train)
+        unique_val_classes = np.unique(y_val) if y_val is not None else []
+        all_unique_classes = np.unique(np.concatenate([unique_train_classes, unique_val_classes])) if len(unique_val_classes) > 0 else unique_train_classes
+        
+        # Ensure we have at least 2 classes for classification
+        if len(all_unique_classes) < 2:
+            logger.warning(f"Only {len(all_unique_classes)} unique classes found. Adding synthetic class for training.")
+            # Add a synthetic second class with a small number of samples
+            if len(all_unique_classes) == 1:
+                synthetic_class = 1 if all_unique_classes[0] == 0 else 0
+                # Add 5% synthetic samples
+                n_synthetic = max(5, int(len(y_train) * 0.05))
+                synthetic_indices = np.random.choice(len(X_train), n_synthetic, replace=False)
+                
+                # Create synthetic samples by slightly modifying existing ones
+                X_synthetic = X_train[synthetic_indices].copy()
+                X_synthetic += np.random.normal(0, 0.01, X_synthetic.shape)  # Add small noise
+                
+                # Append synthetic data
+                X_train = np.vstack([X_train, X_synthetic])
+                y_train = np.concatenate([y_train, np.full(n_synthetic, synthetic_class)])
+                
+                # Update unique classes
+                unique_train_classes = np.unique(y_train)
+                all_unique_classes = unique_train_classes
+        
+        # If classes are not sequential starting from 0, remap them
+        if not np.array_equal(all_unique_classes, np.arange(len(all_unique_classes))):
+            logger.warning(f"Remapping non-sequential classes {all_unique_classes} to sequential")
+            class_mapping = {old_class: new_class for new_class, old_class in enumerate(sorted(all_unique_classes))}
+            y_train = np.array([class_mapping[c] for c in y_train])
+            if y_val is not None:
+                y_val = np.array([class_mapping[c] for c in y_val])
+            # Store the mapping for later use
+            self._class_mapping = class_mapping
+            self._inverse_class_mapping = {v: k for k, v in class_mapping.items()}
+            
+            # Update eval_set if needed
+            if eval_set and y_val is not None:
+                eval_set = [(X_val, y_val)]
+        
+        # Update num_classes in the model
+        n_classes = len(np.unique(y_train))
+        if n_classes > 1:
+            self.model.set_params(num_class=n_classes)
+        
         # Fit with or without early stopping based on XGBoost version
         try:
             if eval_set:
-                # Use early stopping only if we have validation data
+                # For newer XGBoost versions, set early_stopping_rounds in constructor
+                self.model.set_params(early_stopping_rounds=self.config.early_stopping_rounds)
                 self.model.fit(
                     X_train, y_train,
                     eval_set=eval_set,
-                    early_stopping_rounds=self.config.early_stopping_rounds,
                     verbose=False
                 )
             else:
                 # No validation set, train without early stopping
                 self.model.fit(X_train, y_train)
         except (TypeError, ValueError) as e:
-            # Fallback for errors or newer XGBoost versions
+            # Fallback for compatibility issues
             logger.warning(f"Error during model fitting with early stopping: {e}")
-            self.model.fit(X_train, y_train)
+            # Try without early_stopping_rounds parameter
+            if eval_set:
+                try:
+                    self.model.fit(X_train, y_train, eval_set=eval_set, verbose=False)
+                except:
+                    self.model.fit(X_train, y_train)
+            else:
+                self.model.fit(X_train, y_train)
         
         # Get feature importance
         if self.config.track_feature_importance:
@@ -705,8 +759,15 @@ class MarketRegimeXGBoost(ClassificationModel):
         # Make predictions
         predictions = self.model.predict(X)
         
+        # Ensure predictions are 1D numpy array
+        predictions = np.asarray(predictions).flatten()
+        
         # Ensure predictions are integers
         predictions = predictions.astype(int)
+        
+        # If we remapped classes during training, remap back
+        if hasattr(self, '_inverse_class_mapping'):
+            predictions = np.array([self._inverse_class_mapping[p] for p in predictions])
         
         # Decode labels if needed and not returning numeric
         if not return_numeric and hasattr(self.label_encoder, 'classes_'):

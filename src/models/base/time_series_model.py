@@ -8,7 +8,7 @@ from typing import Dict, List, Any, Optional, Union, Tuple
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.model_selection import TimeSeriesSplit
 import structlog
 import joblib
@@ -114,6 +114,12 @@ class TimeSeriesModel(BaseModel):
         elif self.config.scaling_method == "minmax":
             self.scaler = MinMaxScaler()
             self.target_scaler = StandardScaler()  # Use StandardScaler for targets
+        elif self.config.scaling_method == "robust":
+            self.scaler = RobustScaler()
+            self.target_scaler = None  # Don't scale targets with robust scaler
+        elif self.config.scaling_method == "none":
+            self.scaler = None
+            self.target_scaler = None
     
     def create_sequences(
         self, 

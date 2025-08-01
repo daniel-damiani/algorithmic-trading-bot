@@ -294,9 +294,32 @@ class NewsAggregator:
                     'domains': 'bloomberg.com,reuters.com,cnbc.com,marketwatch.com,wsj.com,ft.com,fortune.com,businessinsider.com'
                 }
                 
-                response = requests.get(url, params=params_domains, timeout=30)
-                response.raise_for_status()
-                data = response.json()
+                # Add retry logic with exponential backoff
+                max_retries = 3
+                retry_delay = 1
+                
+                for retry in range(max_retries):
+                    try:
+                        response = requests.get(url, params=params_domains, timeout=30)
+                        if response.status_code == 429:  # Too Many Requests
+                            if retry < max_retries - 1:
+                                logger.warning(f"NewsAPI rate limit hit, retrying in {retry_delay}s...")
+                                time.sleep(retry_delay)
+                                retry_delay *= 2  # Exponential backoff
+                                continue
+                            else:
+                                logger.warning("NewsAPI rate limit exceeded, skipping")
+                                return []
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if retry < max_retries - 1:
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                        else:
+                            raise
                 
                 articles_found = 0
                 if data['status'] == 'ok':
@@ -313,9 +336,30 @@ class NewsAggregator:
                         'pageSize': self.config.max_articles_per_source // len(queries)
                     }
                     
-                    response = requests.get(url, params=params_no_filter, timeout=30)
-                    response.raise_for_status()
-                    data = response.json()
+                    # Retry logic for second request
+                    for retry in range(max_retries):
+                        try:
+                            response = requests.get(url, params=params_no_filter, timeout=30)
+                            if response.status_code == 429:
+                                if retry < max_retries - 1:
+                                    logger.warning(f"NewsAPI rate limit hit (no filter), retrying in {retry_delay}s...")
+                                    time.sleep(retry_delay)
+                                    retry_delay *= 2
+                                    continue
+                                else:
+                                    logger.warning("NewsAPI rate limit exceeded (no filter), skipping")
+                                    break
+                            response.raise_for_status()
+                            data = response.json()
+                            break
+                        except requests.exceptions.RequestException as e:
+                            if retry < max_retries - 1:
+                                time.sleep(retry_delay)
+                                retry_delay *= 2
+                                continue
+                            else:
+                                logger.warning(f"Failed to get NewsAPI articles without filter: {e}")
+                                data = {'status': 'error'}
                 
                 if data['status'] == 'ok':
                     for article in data['articles']:

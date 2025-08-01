@@ -215,14 +215,25 @@ def main():
     # Load configuration
     try:
         config = load_config("config/config.yaml")
-        # Get symbols from config
-        symbols = config.trading.watchlist
     except Exception as e:
-        logger.warning(f"Could not load config: {e}, using default symbols")
-        symbols = ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA", "SPY", "QQQ", "META", "AMZN"]
+        logger.warning(f"Could not load config: {e}")
+    
+    # Use extended symbol list for better training data
+    symbols = [
+        # Mega caps
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B",
+        "JPM", "JNJ", "V", "PG", "UNH", "HD", "MA", "BAC", "XOM", "DIS",
+        # Large caps
+        "CVX", "ABBV", "KO", "PEP", "MRK", "WMT", "PFE", "TMO", "CSCO",
+        "VZ", "CMCSA", "ADBE", "NFLX", "INTC", "WFC", "CRM", "AMD", "BA",
+        # ETFs
+        "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV",
+        # High volatility/popular
+        "GME", "AMC", "PLTR", "SOFI", "RIVN", "LCID", "NIO"
+    ]
     
     # Download parameters
-    start_date = "2020-01-01"  # 4+ years of data
+    start_date = "2023-01-01"  # 2+ years of focused data
     end_date = datetime.now().strftime("%Y-%m-%d")
     
     print("=" * 50)

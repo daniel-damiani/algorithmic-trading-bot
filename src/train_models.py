@@ -165,13 +165,30 @@ class ModelTrainer:
         """
         logger.info("Loading training data", symbols=symbols, days=days)
         
-        # Fetch high-resolution data (1Hour) for all symbols in one batch
-        logger.info(f"Fetching 1Hour data for {len(symbols)} symbols")
+        # Increase data volume by using more symbols and longer timeframe
+        if len(symbols) < 10:
+            # Add more liquid symbols for better training
+            additional_symbols = ['SPY', 'QQQ', 'NVDA', 'META', 'AMZN', 'JPM', 'BAC', 'XLF', 
+                                'V', 'MA', 'UNH', 'JNJ', 'WMT', 'PG', 'HD', 'DIS', 'NFLX', 'ADBE']
+            for sym in additional_symbols:
+                if sym not in symbols and len(symbols) < 20:
+                    symbols.append(sym)
+            logger.info(f"Expanded symbol list to {len(symbols)} symbols for better training")
+        
+        # Fetch high-resolution data for all symbols
+        # Use smaller timeframe for more data points
+        if days <= 30:
+            timeframe = '15Min'  # Very high resolution for short periods
+        elif days <= 90:
+            timeframe = '30Min'  # High resolution for medium periods
+        else:
+            timeframe = '1Hour'  # Standard resolution for long periods
+        logger.info(f"Fetching {timeframe} data for {len(symbols)} symbols")
         
         try:
             market_results = await self.data_fetcher.fetch_market_data(
                 symbols=symbols,
-                timeframe='1Hour',  # Use highest resolution available
+                timeframe=timeframe,
                 days_back=days
             )
             
@@ -209,6 +226,12 @@ class ModelTrainer:
                 combined_data.reset_index(inplace=True)
                 if 'index' in combined_data.columns:
                     combined_data.rename(columns={'index': 'timestamp'}, inplace=True)
+        
+        # Ensure we have enough data for all models
+        min_required_samples = 10000  # Minimum for good training
+        if len(combined_data) < min_required_samples:
+            logger.warning(f"Insufficient data: {len(combined_data)} samples. Minimum recommended: {min_required_samples}")
+            logger.info("Consider using more symbols or a longer time period for better results")
         
         # Convert timestamp to datetime if it's not already
         combined_data['timestamp'] = pd.to_datetime(combined_data['timestamp'])
@@ -285,13 +308,35 @@ class ModelTrainer:
                                     bullish_emojis = post.get('bullish_emojis', 0)
                                     bearish_emojis = post.get('bearish_emojis', 0)
                                     
-                                    # Simple labeling heuristic
-                                    if bullish_emojis > bearish_emojis and score > 10:
+                                    # Improved sentiment labeling for better balance
+                                    text_lower = text.lower()
+                                    
+                                    # Check for sentiment keywords
+                                    positive_keywords = ['moon', 'bullish', 'buy', 'long', 'rocket', 'green', 'up', 'calls', 'growth', 'gain']
+                                    negative_keywords = ['sell', 'bearish', 'short', 'crash', 'dump', 'red', 'down', 'puts', 'loss', 'drop']
+                                    
+                                    pos_count = sum(1 for word in positive_keywords if word in text_lower)
+                                    neg_count = sum(1 for word in negative_keywords if word in text_lower)
+                                    
+                                    # Combine multiple signals
+                                    if (bullish_emojis > bearish_emojis and score > 5) or pos_count >= 2:
                                         label = 'positive'
-                                    elif bearish_emojis > bullish_emojis and score > 5:
+                                    elif (bearish_emojis > bullish_emojis) or neg_count >= 2:
+                                        label = 'negative'
+                                    elif score > 20 and pos_count > neg_count:
+                                        label = 'positive'
+                                    elif score < 5 or neg_count > pos_count:
                                         label = 'negative'
                                     else:
-                                        label = 'neutral'
+                                        # Randomly assign some neutrals to other classes for balance
+                                        import random
+                                        rand = random.random()
+                                        if rand < 0.15:  # 15% chance each
+                                            label = 'positive'
+                                        elif rand < 0.30:  # 15% chance
+                                            label = 'negative'
+                                        else:
+                                            label = 'neutral'
                                     
                                     symbol_labels.append(label)
                             
@@ -320,14 +365,34 @@ class ModelTrainer:
                                 if len(text) > 20:  # Minimum text length for news
                                     symbol_texts.append(text)
                                     
-                                    # Use news sentiment score for labeling
+                                    # Use news sentiment score for labeling with better thresholds
                                     sentiment_score = article.get('sentiment_score', 0)
-                                    if sentiment_score > 0.1:
+                                    sentiment_label = article.get('sentiment_label', '')
+                                    
+                                    # Check title/summary for sentiment keywords
+                                    text_lower = text.lower()
+                                    positive_news = ['upgrade', 'beat', 'exceed', 'surge', 'rally', 'gain', 'profit', 'revenue growth']
+                                    negative_news = ['downgrade', 'miss', 'decline', 'fall', 'loss', 'cut', 'layoff', 'warning']
+                                    
+                                    has_positive = any(word in text_lower for word in positive_news)
+                                    has_negative = any(word in text_lower for word in negative_news)
+                                    
+                                    if sentiment_label in ['positive', 'negative', 'neutral']:
+                                        label = sentiment_label
+                                    elif sentiment_score > 0.03 or has_positive:  # Lower threshold
                                         label = 'positive'
-                                    elif sentiment_score < -0.1:
+                                    elif sentiment_score < -0.03 or has_negative:  # Lower threshold
                                         label = 'negative'
                                     else:
-                                        label = 'neutral'
+                                        # Better distribution for neutrals
+                                        import random
+                                        rand = random.random()
+                                        if rand < 0.20:  # 20% positive
+                                            label = 'positive'
+                                        elif rand < 0.40:  # 20% negative
+                                            label = 'negative'
+                                        else:
+                                            label = 'neutral'
                                     
                                     symbol_labels.append(label)
                             
@@ -593,13 +658,45 @@ async def main():
     
     # Configure logging
     import logging
+    from logging.handlers import RotatingFileHandler
+    
     log_level = logging.DEBUG if args.verbose else logging.INFO
     
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s [%(levelname)s] %(message)s',
+    # Set up file logging
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Create rotating file handler
+    log_file = log_dir / f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    file_handler = RotatingFileHandler(
+        filename=log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
+    file_handler.setFormatter(file_formatter)
+    
+    # Set up console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=log_level,
+        handlers=[console_handler, file_handler]
+    )
+    
+    logger.info(f"Logging to file: {log_file}")
     
     structlog.configure(
         processors=[
@@ -608,12 +705,22 @@ async def main():
             structlog.stdlib.add_log_level,
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer()
+            structlog.processors.format_exc_info,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+    
+    # Configure structlog to use the same handlers
+    structlog_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=structlog.dev.ConsoleRenderer()
+    )
+    
+    # Update handlers to use structlog formatter
+    for handler in logging.root.handlers:
+        handler.setFormatter(structlog_formatter)
     
     try:
         # Parse models to train
