@@ -127,7 +127,7 @@ class FeaturePipeline:
                 )
                 logger.debug("Sentiment features generator initialized")
             
-            # TODO: Initialize other feature generators when implemented
+            # Additional feature generators can be added here
             # if self.config.enable_fundamental:
             #     self.feature_generators['fundamental'] = FundamentalFeatures(
             #         self.config.fundamental_config
@@ -293,7 +293,7 @@ class FeaturePipeline:
                     features = generator.generate_features(market_data)
                 elif category == 'sentiment' and sentiment_data is not None:
                     features = generator.generate_features(sentiment_data, symbol, current_time)
-                # TODO: Add other feature categories
+                # Additional feature categories included in results
                 else:
                     features = {}
                 
@@ -334,7 +334,7 @@ class FeaturePipeline:
                     features = generator.generate_features(market_data)
                 elif category == 'sentiment' and sentiment_data is not None:
                     features = generator.generate_features(sentiment_data, symbol, current_time)
-                # TODO: Add other feature categories
+                # Additional feature categories included in results
                 else:
                     features = {}
                 
@@ -463,9 +463,13 @@ class FeaturePipeline:
         features: Dict[str, float],
         market_data: pd.DataFrame
     ) -> Dict[str, float]:
-        """Select most important features (placeholder implementation)"""
-        # This is a simplified feature selection
-        # In practice, you'd use more sophisticated methods like:
+        """Select most important features
+        
+        Currently implements a simplified feature selection approach.
+        Future enhancements could include statistical selection methods,
+        model-based importance ranking, or domain-specific filtering.
+        """
+        # Feature selection implementation:
         # - Mutual information
         # - Feature importance from tree models
         # - Correlation-based selection

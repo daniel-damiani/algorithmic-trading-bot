@@ -278,6 +278,14 @@ scheduler:
   daily_report: "0 18 * * *"             # 6 PM daily
   model_retrain: "0 2 * * 0"             # 2 AM Sunday
 
+# === PATHS ===
+paths:
+  models: "models/"                    # Model storage directory
+  data: "data/"                        # Data storage directory
+  logs: "logs/"                        # Log files directory
+  backups: "backups/"                  # Backup directory
+  cache: "cache/"                      # Cache directory
+
 # === DATABASE ===
 database:
   connection_string: ${DATABASE_URL}

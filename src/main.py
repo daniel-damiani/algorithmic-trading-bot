@@ -82,18 +82,27 @@ class TradingMode:
 class QuantumSentimentBot:
     """Main trading bot orchestrator"""
     
-    def __init__(self, config_path: str, mode: str = TradingMode.PAPER):
+    def __init__(
+        self, 
+        config_path: Optional[str] = None, 
+        mode: str = TradingMode.PAPER,
+        config: Optional[Config] = None,
+        broker: Optional[Any] = None
+    ):
         """
         Initialize the trading bot
         
         Args:
-            config_path: Path to configuration file
+            config_path: Path to configuration file (ignored if config provided)
             mode: Trading mode (full_auto, semi_auto, paper, backtest)
+            config: Pre-loaded Config object (for backtesting)
+            broker: Pre-initialized broker (for backtesting with SimulatedBroker)
         """
         
         self.mode = mode
-        self.config = Config(config_path)
+        self.config = config or Config(config_path)
         self.is_running = False
+        self._injected_broker = broker  # Store injected broker
         
         # Core components
         self.config_manager = ConfigManager(self.config)
@@ -329,6 +338,16 @@ class QuantumSentimentBot:
     async def _initialize_broker(self) -> None:
         """Initialize broker and related components"""
         
+        # Use injected broker if provided (for backtesting)
+        if self._injected_broker:
+            self.broker = self._injected_broker
+            logger.info("Using injected broker for backtesting")
+            
+            # Connect to simulated broker
+            if not await self.broker.connect():
+                raise RuntimeError("Failed to connect to simulated broker")
+            return
+        
         # Initialize order manager
         order_config = OrderManagerConfig(
             max_orders_per_symbol=10,
@@ -409,25 +428,60 @@ class QuantumSentimentBot:
                     def __init__(self, model):
                         self.model = model
                         self.is_trained = True
+                        self.model_type = type(model).__name__
                     
                     def predict(self, features):
-                        # Handle 5-class prediction output
-                        pred = self.model.predict(features)
-                        # Convert class predictions to signal strength
-                        # Classes: 0=Strong Down, 1=Down, 2=Neutral, 3=Up, 4=Strong Up
-                        signal_map = {0: -1.0, 1: -0.5, 2: 0.0, 3: 0.5, 4: 1.0}
-                        if hasattr(pred, '__iter__'):
-                            return np.array([signal_map.get(int(p), 0.0) for p in pred])
-                        else:
-                            return signal_map.get(int(pred), 0.0)
+                        # Handle different model types
+                        try:
+                            if self.model_type == 'MarketRegimeXGBoost':
+                                # This model expects OHLCV data, not features
+                                # We need to use a different approach - try to use the model's internal prediction
+                                # if it has a trained XGBoost model inside
+                                if hasattr(self.model, 'model') and hasattr(self.model.model, 'predict'):
+                                    # Try to predict using the internal XGBoost model with features
+                                    pred = self.model.model.predict(features.values)
+                                else:
+                                    # Fallback: return neutral signal
+                                    logger.warning(f"Cannot predict with {self.model_type} - returning neutral")
+                                    return 0.0
+                            else:
+                                # Regular XGBoost model
+                                pred = self.model.predict(features)
+                            
+                            # Convert class predictions to signal strength
+                            # Classes: 0=Strong Down, 1=Down, 2=Neutral, 3=Up, 4=Strong Up
+                            signal_map = {0: -1.0, 1: -0.5, 2: 0.0, 3: 0.5, 4: 1.0}
+                            if hasattr(pred, '__iter__'):
+                                return np.array([signal_map.get(int(p), 0.0) for p in pred])
+                            else:
+                                return signal_map.get(int(pred), 0.0)
+                        except Exception as e:
+                            logger.warning(f"Prediction failed with {self.model_type}: {e} - returning neutral")
+                            return 0.0
                     
                     def predict_proba(self, features):
-                        if hasattr(self.model, 'predict_proba'):
-                            return self.model.predict_proba(features)
+                        try:
+                            if self.model_type == 'MarketRegimeXGBoost':
+                                # Try to use internal model for probabilities
+                                if hasattr(self.model, 'model') and hasattr(self.model.model, 'predict_proba'):
+                                    return self.model.model.predict_proba(features.values)
+                                else:
+                                    # Fallback: return neutral probabilities
+                                    return np.array([[0.2, 0.2, 0.2, 0.2, 0.2]])
+                            else:
+                                if hasattr(self.model, 'predict_proba'):
+                                    return self.model.predict_proba(features)
+                        except Exception as e:
+                            logger.warning(f"Probability prediction failed: {e}")
+                            
+                        # Final fallback
+                        pred = self.predict(features)
+                        if hasattr(pred, '__iter__'):
+                            # Multi-class case - return uniform probabilities
+                            return np.array([[0.2, 0.2, 0.2, 0.2, 0.2]])
                         else:
-                            # For models without probability, use prediction
-                            pred = self.predict(features)
-                            return np.column_stack([1-pred, pred])
+                            # Binary case
+                            return np.array([[1-abs(pred), abs(pred)]])
                 
                 return XGBoostWrapper(model)
             except Exception as e:
@@ -572,6 +626,140 @@ class QuantumSentimentBot:
             
         except Exception as e:
             logger.error("Error in trading cycle", error=str(e))
+    
+    async def _trading_cycle_backtest(self, symbols: List[str], timestamp: datetime) -> None:
+        """
+        Execute one trading cycle for backtesting - event-driven, no sleep
+        
+        Args:
+            symbols: List of symbols to trade
+            timestamp: Current simulation timestamp
+        """
+        
+        logger.debug(f"🔄 BACKTEST CYCLE - {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        try:
+            # 1. Generate predictions for current timestamp
+            if symbols:
+                await self._generate_predictions_backtest(symbols, timestamp)
+            
+            # 2. Check comprehensive risk limits
+            if not await self._check_risk_limits():
+                logger.debug("🛑 Risk limits exceeded, trading halted for this cycle")
+                return
+            
+            # 3. Execute pending signals
+            await self._execute_signals()
+            
+            # 4. Monitor positions (position tracking handled by simulated broker)
+            await self._monitor_positions()
+            
+        except Exception as e:
+            logger.error("Error in backtest trading cycle", 
+                        error=str(e), timestamp=timestamp)
+    
+    async def _generate_predictions_backtest(
+        self, 
+        symbols: List[str], 
+        timestamp: datetime
+    ) -> None:
+        """
+        Generate predictions for backtesting at specific timestamp
+        
+        Args:
+            symbols: List of symbols to analyze
+            timestamp: Current simulation timestamp
+        """
+        
+        logger.debug("🧠 Generating backtest predictions...")
+        
+        # Get market data for all symbols up to current timestamp
+        for symbol in symbols:
+            try:
+                # Get market data up to current timestamp
+                bars = await self.broker.get_bars(
+                    symbol,
+                    timeframe="1Hour",
+                    end=timestamp,
+                    limit=500
+                )
+                
+                if bars is None or bars.empty:
+                    logger.debug(f"⚠️ No market data for {symbol} at {timestamp}")
+                    continue
+                
+                # Ensure we have enough data
+                if len(bars) < 50:  # Need minimum bars for technical indicators
+                    logger.debug(f"⚠️ Insufficient data for {symbol} ({len(bars)} bars)")
+                    continue
+                
+                logger.debug(f"🔍 Analyzing {symbol} with {len(bars)} bars...")
+                
+                # Get sentiment data (simplified for backtesting)
+                sentiment_dict = {
+                    'sentiment_score': 0.0,  # Neutral sentiment for backtesting
+                    'confidence': 0.5,
+                    'sources': ['backtest'],
+                    'timestamp': timestamp
+                }
+                
+                sentiment_df = pd.DataFrame([sentiment_dict])
+                sentiment_df.set_index('timestamp', inplace=True)
+                
+                # Generate features
+                feature_result = self.feature_pipeline.generate_features(
+                    symbol=symbol,
+                    market_data=bars,
+                    sentiment_data=sentiment_df
+                )
+                
+                features_dict = feature_result.get('features', {})
+                if not features_dict:
+                    continue
+                
+                # Convert to DataFrame for model prediction
+                import pandas as pd
+                features = pd.DataFrame([features_dict])
+                
+                # Get prediction from model
+                try:
+                    if hasattr(self.ensemble_model, 'predict'):
+                        raw_prediction = self.ensemble_model.predict(features)
+                        
+                        if isinstance(raw_prediction, np.ndarray) and len(raw_prediction) > 0:
+                            signal_strength = float(raw_prediction[0])
+                            confidence = 0.7  # Default confidence
+                        else:
+                            signal_strength = float(raw_prediction)
+                            confidence = 0.7
+                    else:
+                        logger.warning(f"Model has no predict method for {symbol}")
+                        continue
+                        
+                except Exception as e:
+                    logger.debug(f"Prediction failed for {symbol}: {e}")
+                    continue
+                
+                # Create trading signal
+                signal = {
+                    'symbol': symbol,
+                    'signal': 'buy' if signal_strength > 0 else 'sell',
+                    'strength': abs(signal_strength),
+                    'confidence': confidence,
+                    'timestamp': timestamp,
+                    'features': features.iloc[-1].to_dict(),
+                    'sentiment_data': sentiment_dict,
+                    'technical_indicators': self._extract_technical_indicators(features)
+                }
+                
+                # Validate signal
+                is_valid = await self._validate_signal_by_strategy(signal)
+                if is_valid:
+                    self.pending_signals.append(signal)
+                    logger.debug(f"✅ BACKTEST SIGNAL: {signal['signal'].upper()} {symbol} (strength: {signal['strength']:.3f})")
+                
+            except Exception as e:
+                logger.debug(f"Failed to generate backtest prediction for {symbol}: {e}")
     
     async def _update_market_data(self) -> None:
         """Update market data for all tracked symbols"""
@@ -896,7 +1084,16 @@ class QuantumSentimentBot:
             await self._portfolio_risk_monitoring()
     
     async def _basic_stop_loss_check(self, position) -> bool:
-        """Basic stop loss check when RiskEngine method not available"""
+        """Basic stop loss check when RiskEngine method not available
+        
+        Implements simple percentage-based stop loss logic.
+        
+        Args:
+            position: Position object to check
+            
+        Returns:
+            bool: True if stop loss is triggered
+        """
         
         try:
             # Simple percentage-based stop loss
@@ -914,7 +1111,16 @@ class QuantumSentimentBot:
             return False
     
     async def _basic_take_profit_check(self, position) -> bool:
-        """Basic take profit check when RiskEngine method not available"""
+        """Basic take profit check when RiskEngine method not available
+        
+        Implements simple percentage-based take profit logic.
+        
+        Args:
+            position: Position object to check
+            
+        Returns:
+            bool: True if take profit is triggered
+        """
         
         try:
             # Simple percentage-based take profit
@@ -932,7 +1138,16 @@ class QuantumSentimentBot:
             return False
     
     async def _assess_position_risk(self, position) -> Dict[str, Any]:
-        """Assess risk for individual position"""
+        """Assess risk for individual position
+        
+        Evaluates position-specific risk factors including size, P&L, age, and volatility.
+        
+        Args:
+            position: Position object to assess
+            
+        Returns:
+            Dict containing risk_score, risk_factors, and critical_risk flag
+        """
         
         try:
             risk_factors = []
@@ -992,7 +1207,11 @@ class QuantumSentimentBot:
             return {'risk_score': 0, 'risk_factors': [], 'critical_risk': False}
     
     async def _portfolio_risk_monitoring(self) -> None:
-        """Periodic comprehensive portfolio risk monitoring"""
+        """Periodic comprehensive portfolio risk monitoring
+        
+        Performs portfolio-level risk checks including leverage, concentration,
+        and position correlations. Called every 10 monitoring cycles.
+        """
         
         try:
             positions = self.position_tracker.get_all_positions()
@@ -1198,7 +1417,17 @@ class QuantumSentimentBot:
             return await self._calculate_simple_position_size(signal, await self.broker.get_account().equity)
     
     async def _calculate_simple_position_size(self, signal: Dict[str, Any], equity: float) -> float:
-        """Fallback simple position sizing method"""
+        """Fallback simple position sizing method
+        
+        Uses fixed percentage risk per trade when Kelly Criterion calculation fails.
+        
+        Args:
+            signal: Trading signal dictionary
+            equity: Current account equity
+            
+        Returns:
+            float: Number of shares to trade
+        """
         
         try:
             # Use fixed percentage risk
@@ -1322,7 +1551,14 @@ class QuantumSentimentBot:
             return await self._basic_risk_check()
     
     async def _basic_risk_check(self) -> bool:
-        """Fallback basic risk checking when comprehensive assessment fails"""
+        """Fallback basic risk checking when comprehensive assessment fails
+        
+        Performs simplified risk checks based on drawdown and daily loss limits.
+        Used when the comprehensive RiskEngine assessment is unavailable.
+        
+        Returns:
+            bool: True if risk limits are within acceptable ranges
+        """
         
         try:
             # Get current metrics

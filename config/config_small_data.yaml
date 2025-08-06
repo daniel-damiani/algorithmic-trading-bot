@@ -189,6 +189,14 @@ scheduler:
   daily_report: "0 18 * * *"
   model_retrain: "0 2 * * 0"
 
+# === PATHS ===
+paths:
+  models: "models/"
+  data: "data/"
+  logs: "logs/"
+  backups: "backups/"
+  cache: "cache/"
+
 # === DATABASE ===
 database:
   connection_string: ${DATABASE_URL}
