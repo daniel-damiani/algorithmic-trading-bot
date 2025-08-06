@@ -159,3 +159,6 @@ NOTES.md
 model_registry/
 archive/
 models/
+data/
+backups/
+test_models/

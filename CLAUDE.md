@@ -1,5 +1,7 @@
 # QuantumSentiment - Core Directives & Project Context
 
+the most important part is to never stop until the results are fine. make the data biggest ever, make whatever, it needs to work for real trading. but track changelog to not run in circles, if you tried something and it didnt work, do something else and finally decide on the version with the best scores.    
+
 ## Project Snapshot
 - **Project:** QuantumSentiment AI Trading System
 - **Objective:** Build a fully functional, production-ready trading bot.

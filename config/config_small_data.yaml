@@ -1,0 +1,225 @@
+# QuantumSentiment Trading Bot Configuration - SMALL DATA VERSION
+# Temporary configuration for limited historical data
+
+# === SYSTEM CONFIGURATION ===
+system:
+  name: "QuantumSentiment"
+  version: "1.0.0"
+  environment: "development"
+  log_level: "INFO"
+  timezone: "UTC"
+
+# === TRADING CONFIGURATION ===
+trading:
+  # Universe of stocks to trade
+  watchlist:
+    - AAPL
+    - GOOGL  
+    - MSFT
+    - TSLA
+    - NVDA
+    - SPY
+    - QQQ
+    - META
+    - AMZN
+  
+  # Position limits
+  max_positions: 10
+  max_position_size: 0.10  # 10% max per position
+  min_position_size: 0.001  # 0.1% min per position
+  
+  # Signal thresholds
+  signal_threshold: 0.7
+  confidence_threshold: 0.6
+  
+  # Trading strategy mode
+  strategy_mode: "adaptive"  # adaptive, technical_only, sentiment_only, conservative
+  
+  # Signal source requirements for different modes
+  signal_requirements:
+    adaptive:
+      use_available_signals: true
+      confidence_boost_both: 0.1
+      min_signal_strength: 0.3
+
+# === BROKER CONFIGURATION ===
+broker:
+  name: "alpaca"
+  paper_url: "https://paper-api.alpaca.markets/v2"
+  live_url: "https://api.alpaca.markets"
+  timeout: 30
+
+# === DATA SOURCES ===
+data_sources:
+  alpaca:
+    enabled: true
+    rate_limit: 200
+    
+  reddit:
+    enabled: true
+    subreddits: ["wallstreetbets", "stocks", "cryptocurrency", "investing"]
+    rate_limit: 60
+    min_score: 10
+    lookback_hours: 24
+    
+  twitter:
+    enabled: false
+    rate_limit: 300
+    accounts: ["whale_alert", "jimcramer", "zerohedge"]
+    
+  alpha_vantage:
+    enabled: true
+    rate_limit: 5
+    
+  unusual_whales:
+    enabled: true
+    scrape_delay: 900
+    rate_limit: 1
+
+# === MACHINE LEARNING - ADJUSTED FOR SMALL DATA ===
+ml:
+  # Reduced training settings for small data
+  training:
+    epochs: 50                       # Reduced from 500
+    batch_size: 16                   # Larger batch for small data
+    learning_rate: 0.001             # Higher LR for faster convergence
+    early_stopping_patience: 10      # Less patience
+    gradient_accumulation_steps: 1   # No accumulation needed
+    warmup_epochs: 5                 # Shorter warmup
+    mixed_precision: false           # Disabled for stability
+    num_workers: 4
+    
+  models:
+    price_lstm:
+      enabled: true
+      sequence_length: 20            # Much shorter (from 120)
+      forecast_horizon: 1            # Single step prediction
+      lstm_layers: 2                 # Fewer layers
+      lstm_hidden_size: 64           # Smaller hidden size
+      lstm_dropout: 0.2              # Less dropout
+      bidirectional: false           # Simpler model
+      use_attention: false           # No attention for small data
+      fc_layers: [32, 16]            # Smaller FC layers
+      
+    pattern_cnn:
+      enabled: true
+      image_size: [32, 64]           # Smaller images
+      channels: 5                    # OHLCV only
+      use_residual_blocks: false     # Simpler architecture
+      patterns: ["head_shoulders", "triangle", "flag", "wedge"]  # Basic patterns
+      confidence_threshold: 0.7
+      
+    regime_xgboost:
+      enabled: true
+      regimes: ["trending", "ranging", "volatile"]  # Basic regimes
+      n_estimators: 100              # Fewer trees
+      max_depth: 4                   # Shallower trees
+      learning_rate: 0.1
+      
+    sentiment_bert:
+      enabled: true
+      model_name: "ProsusAI/finbert"
+      max_length: 256                # Shorter sequences
+      batch_size: 8                  # Smaller batches
+      
+  ensemble:
+    voting: "weighted"
+    meta_learner: "xgboost"          # Simpler meta-learner
+    rebalance_frequency: "daily"
+    min_confidence: 0.60             # Lower threshold
+
+# === SIMPLE FEATURE ENGINEERING ===
+features:
+  technical:
+    timeframes: ["1h", "4h"]         # Fewer timeframes
+    indicators:
+      - "sma_20"
+      - "ema_12"
+      - "rsi_14"
+      - "macd"
+      - "bollinger_bands"
+      - "atr_14"
+      - "volume_sma_20"
+      
+  sentiment:
+    sources: ["reddit", "news"]       # Fewer sources
+    aggregation: "weighted_average"
+    decay_factor: 0.95
+    
+  fundamental:
+    metrics: ["pe_ratio", "market_cap", "volume"]
+    update_frequency: "daily"
+
+# === RISK MANAGEMENT ===
+risk:
+  max_drawdown: 0.15                 # More lenient
+  daily_loss_limit: 0.05
+  max_leverage: 1.0
+  stop_loss_pct: 0.03                # Wider stops
+  take_profit_pct: 0.05
+  risk_per_trade: 0.02               # Higher risk tolerance
+  max_correlation: 0.8
+  max_sector_concentration: 0.4
+
+# === PORTFOLIO OPTIMIZATION ===
+portfolio:
+  optimizer: "markowitz"             # Simple optimization
+  rebalance_frequency: "daily"
+  target_volatility: 0.20            # Higher volatility tolerance
+  constraints:
+    max_weight: 0.25
+    min_weight: 0.01
+    turnover_limit: 0.5
+
+# === SYMBOLS & UNIVERSE ===
+universe:
+  stocks: ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "SPY", "QQQ"]
+  filters:
+    min_market_cap: 1e9
+    min_volume: 1e6
+    max_spread: 0.02                 # More lenient
+
+# === SCHEDULING ===
+scheduler:
+  market_data_update: "*/5 * * * *"  # Less frequent
+  sentiment_update: "*/15 * * * *"
+  model_prediction: "*/30 * * * *"
+  portfolio_rebalance: "0 * * * *"
+  risk_check: "*/5 * * * *"
+  daily_report: "0 18 * * *"
+  model_retrain: "0 2 * * 0"
+
+# === DATABASE ===
+database:
+  connection_string: ${DATABASE_URL}
+
+# === MONITORING & ALERTS ===
+monitoring:
+  dashboard:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8000
+
+# === BACKTESTING ===
+backtest:
+  start_date: "2023-01-01"           # Shorter period
+  end_date: "2024-12-31"
+  initial_capital: 1000.0
+  commission:
+    stock: 0.001
+    crypto: 0.002
+  slippage:
+    model: "market_impact"
+    base_cost: 0.0005
+  validation:
+    walk_forward: true
+    train_days: 30                   # Shorter training window
+    test_days: 7                     # Shorter test window
+    monte_carlo_runs: 100            # Fewer runs
+
+# === DEVELOPMENT ===
+development:
+  debug: false
+  profiling: false
+  mock_apis: false
+  fast_mode: true                    # Enable fast mode for testing

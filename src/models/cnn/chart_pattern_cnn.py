@@ -168,9 +168,13 @@ class ChartPatternCNN(ClassificationModel):
         """Build the CNN model"""
         # Update config with actual number of classes if label encoder is fitted
         if hasattr(self, 'label_encoder') and self.label_encoder is not None:
-            self.config.n_classes = len(self.label_encoder.classes_)
-            self.config.pattern_classes = list(self.label_encoder.classes_)
-            logger.info(f"Updated CNN config with {self.config.n_classes} classes from label encoder")
+            if hasattr(self.label_encoder, 'classes_'):
+                self.config.n_classes = len(self.label_encoder.classes_)
+                self.config.pattern_classes = list(self.label_encoder.classes_)
+                logger.info(f"Updated CNN config with {self.config.n_classes} classes from label encoder")
+            else:
+                logger.warning("Label encoder not fitted yet, using default n_classes")
+                self.config.n_classes = getattr(self.config, 'n_classes', 6)  # Default 6 pattern classes
         
         self.model = ChartPatternCNNNetwork(self.config)
         self.model.to(self.device)

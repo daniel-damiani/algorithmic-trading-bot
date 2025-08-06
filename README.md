@@ -1,163 +1,180 @@
-# QuantumSentiment Algorithmic Trading Bot 🚀
+# QuantumSentiment Trading Bot
 
-A state-of-the-art algorithmic trading system that combines:
-- 🧠 **AI-Powered Predictions**: CNN, LSTM, XGBoost, and Transformer models
-- 💬 **Sentiment Analysis**: Reddit and news sentiment fusion
-- 📊 **Smart Portfolio Management**: Regime-aware optimization
-- ⚡ **Advanced Execution**: TWAP, VWAP, and Iceberg strategies
-- 🛡️ **Comprehensive Risk Management**: Multi-layer protection
-- 📈 **Full Broker Integration**: Complete Alpaca API integration
+AI-powered trading system using sentiment analysis and machine learning for Alpaca paper trading.
 
+## Quick Start
 
-## 📚 Documentation
+### 1. Environment Setup
 
-Comprehensive guides are available in the `docs/guides/` directory:
+```bash
+# Clone repository
+git clone <repository-url>
+cd algorithmic-trading-bot
 
-1. **[Quick Start Guide](docs/guides/quick_start.md)** - Get trading in 5 minutes
-2. **[Getting Started](docs/guides/getting_started.md)** - Detailed setup instructions
-3. **[System Architecture](docs/guides/system_architecture.md)** - How everything works together
-4. **[Trading Strategies](docs/guides/trading_strategies.md)** - Strategy details and customization
-5. **[Risk Management](docs/guides/risk_management.md)** - Risk controls and safety features
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-## 🎯 System Capabilities
+# Install dependencies
+pip install -r requirements.txt
+```
 
-### Intelligent Signal Generation
-- **Multi-Model Ensemble**: Combines predictions from 4 specialized AI models
-- **Sentiment Integration**: Analyzes Reddit posts and news articles
-- **108+ Features**: Technical indicators, microstructure, and sentiment metrics
-- **Confidence Scoring**: Only trades high-confidence signals
+### 2. Configuration
 
-### Smart Execution
-- **Slippage Prediction**: XGBoost model predicts and minimizes slippage
-- **Market Impact Models**: Kyle's Lambda and Almgren-Chriss optimization
-- **Adaptive Strategies**: TWAP, VWAP, and Iceberg based on conditions
-- **Multi-Venue Support**: Ready for expansion beyond Alpaca
+Create `.env` file with your API keys:
+```env
+ALPACA_API_KEY=your_api_key
+ALPACA_SECRET_KEY=your_secret_key
+REDDIT_CLIENT_ID=your_reddit_id
+REDDIT_CLIENT_SECRET=your_reddit_secret
+NEWS_API_KEY=your_news_api_key
+```
+
+### 3. Download Training Data
+
+```bash
+# Download massive dataset (130K+ rows, 104 symbols, 5 years)
+python scripts/download_massive_data.py --symbols 104 --years 5
+
+# Download quality-filtered data (recommended)
+python scripts/download_quality_data.py --top 50
+```
+
+### 4. Train Models
+
+```bash
+# Train 5-class model (BEST PERFORMANCE: 49.6% accuracy, 29.6% above baseline)
+python train_simple_massive.py --symbols 30 --target 0.65
+
+# Alternative: Train binary model (54.7% accuracy, 4.7% above baseline)  
+python train_binary_massive.py --symbols 50 --horizon 3
+```
+
+### 5. Run Trading Bot
+
+```bash
+# Paper trading mode (recommended)
+python src/main.py --mode PAPER
+
+# Backtest mode (currently broken - see TODO.md Phase 6)
+python src/main.py --mode BACKTEST
+```
+
+## System Architecture
+
+### Data Pipeline
+- **Historical Data**: 5 years of hourly price data from Alpaca
+- **Sentiment Sources**: Reddit (r/wallstreetbets, r/stocks) + News APIs
+- **Features**: 119 technical indicators + sentiment scores
+
+### Models
+- **Price Prediction**: XGBoost (5-class direction + magnitude)
+- **Sentiment Analysis**: FinBERT (financial sentiment)
+- **Ensemble**: Stacked model combining all predictions
 
 ### Risk Management
-- **Position Controls**: Stop loss, take profit, position sizing
-- **Portfolio Limits**: Drawdown protection, concentration limits
-- **Real-time Monitoring**: Continuous risk assessment
-- **Emergency Stops**: Automatic circuit breakers
+- Position sizing: Kelly Criterion
+- Max drawdown: 20%
+- Stop loss: 2% per position
+- Portfolio exposure limits
 
-### Performance Tracking
-- **Real-time P&L**: Track unrealized and realized gains
-- **Risk Metrics**: Sharpe ratio, VaR, maximum drawdown
-- **Trade Analytics**: Win rate, risk/reward, execution quality
-- **Account Monitoring**: Margin, buying power, PDT compliance
+## Performance
 
-## 🔧 Configuration Options
+### Individual Model Results
 
-### Trading Modes
-- **full_auto**: Fully autonomous trading
-- **semi_auto**: Generates signals, requires approval
-- **paper**: Paper trading with Alpaca
-- **backtest**: Historical strategy testing
+| Model | Type | Accuracy | Performance vs Baseline | Status |
+|-------|------|----------|------------------------|---------|
+| **XGBoost** | 5-class | **49.6%** | **+29.6%** | ✅ **Best - Use for trading** |
+| LSTM | 5-class | ~41% | +21% | ❌ Overfitting |
+| CNN | 5-class | ~41% | +21% | ❌ Poor performance |
+| Ensemble | 5-class | ~44% | +24% | ⚠️ Marginal improvement |
+| XGBoost | Binary | 54.7% | +4.7% | ⚠️ Low edge |
 
-### Risk Profiles
-Edit `config/config.yaml` to adjust risk:
-```yaml
-# Conservative
-risk:
-  max_position_size: 0.05  # 5% max
-  stop_loss_pct: 0.01     # 1% stop
-  max_drawdown: 0.05      # 5% max DD
+### How to Use Models
 
-# Moderate (default)
-risk:
-  max_position_size: 0.10  # 10% max
-  stop_loss_pct: 0.02     # 2% stop
-  max_drawdown: 0.10      # 10% max DD
-
-# Aggressive
-risk:
-  max_position_size: 0.15  # 15% max
-  stop_loss_pct: 0.03     # 3% stop
-  max_drawdown: 0.15      # 15% max DD
-```
-
-## 📊 Monitoring Your Bot
-
-### Check Status
+**Option 1: Single Model (Recommended)**
 ```bash
-python scripts/check_status.py
+# Train only XGBoost (best performance)
+python train_simple_massive.py --model xgboost --symbols 30
+
+# Use in trading
+python src/main.py --mode PAPER --model xgboost
 ```
 
-### View Real-time Logs
+**Option 2: Specific Models**
 ```bash
-tail -f logs/trading.log
+# Train specific models
+python scripts/train_massive_data.py --models "xgboost,lstm" --symbols 30
+
+# Use multiple models
+python src/main.py --mode PAPER --models "xgboost,lstm"
 ```
 
-### Performance Dashboard
+**Option 3: All Models (Ensemble)**
 ```bash
-python scripts/run_dashboard.py
-# Open http://localhost:8050
+# Train all models (slow, not recommended)
+python scripts/train_massive_data.py --models "all" --symbols 30
+
+# Use ensemble
+python src/main.py --mode PAPER --model ensemble
 ```
 
-### Daily Summary
-```bash
-python scripts/daily_summary.py
+### Model Selection Guide
+
+- **For Production**: Use XGBoost only (49.6% accuracy, reliable)
+- **For Research**: Test individual models to find improvements
+- **Avoid**: CNN/LSTM alone (poor performance on financial data)
+- **Ensemble Note**: Only marginally better than XGBoost alone
+
+## File Structure
+
+```
+├── config/
+│   └── config.yaml          # Main configuration
+├── src/
+│   ├── main.py             # Trading bot entry point
+│   ├── data/               # Data fetching modules
+│   ├── features/           # Feature engineering
+│   ├── models/             # ML model implementations
+│   ├── portfolio/          # Portfolio management
+│   ├── risk/               # Risk management
+│   └── sentiment/          # Sentiment analysis
+├── scripts/
+│   ├── download_massive_data.py    # Data download
+│   └── train_massive_data.py       # Model training
+└── train_simple_massive.py         # Simplified training
 ```
 
-## 🛠️ Useful Scripts
+## Common Issues
 
-- `scripts/verify_setup.py` - Verify your setup is correct
-- `scripts/check_status.py` - Check current system status
-- `scripts/emergency_flatten.py` - Emergency position closure
-- `scripts/show_positions.py` - Display current positions
-- `scripts/generate_report.py` - Generate performance reports
+### Memory Issues
+- Reduce `--symbols` parameter when training
+- Use `config_small_data.yaml` for testing
 
-## 🚀 What's Next?
+### Model Not Found
+- Ensure models are trained before running main.py
+- Check `models/` directory for saved models
 
-### 1. Paper Trade for 1-2 Weeks
-- Monitor daily performance
-- Understand the bot's behavior
-- Fine-tune parameters
+## Development Status
 
-### 2. Analyze Results
-- Review win rate and risk/reward
-- Identify best-performing strategies
-- Optimize position sizing
+**Working**: 
+- ✅ Model training pipeline
+- ✅ Data download and preprocessing  
+- ✅ Feature engineering
+- ✅ 49.6% 5-class accuracy achieved
 
-### 3. Graduate to Live Trading
-- Start with minimal capital
-- Gradually increase as confidence grows
-- Always monitor actively
+**In Progress** (see TODO.md):
+- ⚠️ Phase 3: Connect real sentiment to main.py
+- ⚠️ Phase 4: Integrate advanced risk management
+- ⚠️ Phase 6: Fix backtesting engine
 
-### 4. Continuous Improvement
-- Add new data sources
-- Train on recent data
-- Implement new strategies
-- Join the community
+## Next Steps
 
-## ⚠️ Important Disclaimers
+1. Complete Phase 3 from TODO.md (remove mock data)
+2. Run extended paper trading tests
+3. Monitor performance metrics
+4. Implement Phase 4-6 improvements
 
-1. **This is not financial advice** - Trading involves substantial risk
-2. **Start with paper trading** - Always test thoroughly before using real money
-3. **Monitor regularly** - Automated doesn't mean unattended
-4. **Understand the risks** - You can lose money, even with sophisticated algorithms
-5. **Past performance doesn't guarantee future results**
+## Support
 
-## 🤝 Community and Support
-
-- **Issues**: Report bugs and request features on GitHub
-- **Discussions**: Share strategies and results
-- **Documentation**: Continuously updated guides
-- **Updates**: Regular improvements and bug fixes
-
-## 🎊 Congratulations!
-
-You now have a professional-grade algorithmic trading system at your disposal. The combination of:
-- Advanced AI models
-- Real-time sentiment analysis  
-- Sophisticated risk management
-- Smart order execution
-
-...gives you a significant edge in the markets.
-
-**Remember**: Start small, learn continuously, and always prioritize risk management.
-
-Happy Trading! May your algorithms be profitable and your drawdowns be minimal! 🚀📈
-
----
-
-*Built with passion for quantitative trading and AI*
+See CLAUDE.md for development guidelines and TODO.md for detailed refactoring plan.

@@ -292,7 +292,15 @@ class UniversalFeatureGenerator:
             return features
         
         df = data.copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # Handle timezone-aware datetime conversion properly
+        if pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+            # Already datetime, check if timezone-aware
+            if hasattr(df['timestamp'].dtype, 'tz') and df['timestamp'].dt.tz is not None:
+                # Convert timezone-aware to UTC then remove timezone info
+                df['timestamp'] = df['timestamp'].dt.tz_convert('UTC').dt.tz_localize(None)
+        else:
+            # Convert to datetime with UTC handling
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True).dt.tz_localize(None)
         
         if self.config.add_cyclical_encoding:
             # Cyclical encoding for time features

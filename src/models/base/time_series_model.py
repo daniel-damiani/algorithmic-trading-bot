@@ -167,17 +167,36 @@ class TimeSeriesModel(BaseModel):
         target_sequences = [] if targets is not None else None
         
         for i in range(0, n_sequences * stride, stride):
+            # Check bounds before creating sequences
+            if i + seq_length >= len(data):
+                break
+            if targets is not None and i + seq_length >= len(targets):
+                break
+                
             # Input sequence
             seq = data[i:i + seq_length]
             sequences.append(seq)
             
             # Target sequence
             if targets is not None:
+                target_idx = i + seq_length
                 if self.config.forecast_horizon == 1:
-                    target = targets[i + seq_length]
+                    if target_idx < len(targets):
+                        target = targets[target_idx]
+                        target_sequences.append(target)
+                    else:
+                        # Remove the last sequence if we can't get a target
+                        sequences.pop()
+                        break
                 else:
-                    target = targets[i + seq_length:i + seq_length + self.config.forecast_horizon]
-                target_sequences.append(target)
+                    end_idx = target_idx + self.config.forecast_horizon
+                    if end_idx <= len(targets):
+                        target = targets[target_idx:end_idx]
+                        target_sequences.append(target)
+                    else:
+                        # Remove the last sequence if we can't get a full target sequence
+                        sequences.pop()
+                        break
         
         sequences = np.array(sequences)
         if target_sequences is not None:

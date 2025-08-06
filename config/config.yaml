@@ -96,7 +96,7 @@ data_sources:
     scrape_delay: 900  # 15 minutes between scrapes
     rate_limit: 1      # requests per minute
 
-bu# === MACHINE LEARNING - ADAPTIVE CONFIGURATION ===
+# === MACHINE LEARNING - ADAPTIVE CONFIGURATION ===
 ml:
   # Adaptive model settings that scale with data availability
   adaptive_scaling: true              # Enable automatic architecture scaling
