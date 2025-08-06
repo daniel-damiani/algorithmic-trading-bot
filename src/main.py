@@ -41,7 +41,7 @@ from src.sentiment import SentimentFusion, RedditSentimentAnalyzer, NewsAggregat
 from src.features import FeaturePipeline
 from src.models import StackedEnsemble
 from src.portfolio import RegimeAwareAllocator
-from src.risk import RiskEngine
+from src.risk import RiskEngine, PositionSizer, PositionSizingConfig, RiskConfig
 from src.execution import SmartOrderRouter, RoutingConfig
 from src.broker import (
     AlpacaBroker, OrderManager, OrderManagerConfig,
@@ -104,6 +104,7 @@ class QuantumSentimentBot:
         self.ensemble_model = None
         self.portfolio_optimizer = None
         self.risk_engine = None
+        self.position_sizer = None
         self.execution_router = None
         self.broker = None
         self.dynamic_discovery = None
@@ -142,34 +143,100 @@ class QuantumSentimentBot:
             logger.info("Initializing data fetcher...")
             self.data_fetcher = DataFetcher(self.config, self.db_manager)
             
-            # 3. Initialize sentiment analysis (temporarily disabled for testing)
+            # 3. Initialize sentiment analysis
             logger.info("Initializing sentiment analysis...")
             
-            # Temporary mock sentiment analyzer for testing
-            class MockSentimentAnalyzer:
+            # Create Reddit config from environment variables and main config
+            from src.sentiment.reddit_analyzer import RedditConfig
+            reddit_config = RedditConfig(
+                client_id=os.getenv('REDDIT_CLIENT_ID', ''),
+                client_secret=os.getenv('REDDIT_CLIENT_SECRET', ''),
+                user_agent=os.getenv('REDDIT_USER_AGENT', 'QuantumSentiment/1.0'),
+                subreddits=self.config.data_sources.reddit.subreddits
+            )
+            reddit_analyzer = RedditSentimentAnalyzer(reddit_config)
+            await reddit_analyzer.initialize()  # Initialize Reddit API connection
+            
+            # Create News config from environment variables
+            from src.sentiment.news_aggregator import NewsConfig
+            news_config = NewsConfig(
+                alpha_vantage_key=os.getenv('ALPHA_VANTAGE_API_KEY', ''),
+                newsapi_key=os.getenv('NEWSAPI_KEY', '')
+            )
+            news_aggregator = NewsAggregator(news_config)
+            news_aggregator.initialize()  # Initialize News aggregator
+            
+            # Store analyzers for sentiment fusion
+            self.reddit_analyzer = reddit_analyzer
+            self.news_aggregator = news_aggregator
+            
+            # Initialize SentimentFusion
+            from src.sentiment.sentiment_fusion import SentimentFusion, FusionConfig
+            fusion_config = FusionConfig()
+            self.sentiment_fusion = SentimentFusion(fusion_config)
+            
+            # Create a wrapper that combines analyzers and fusion
+            class SentimentManager:
+                def __init__(self, reddit_analyzer, news_aggregator, sentiment_fusion):
+                    self.reddit_analyzer = reddit_analyzer
+                    self.news_aggregator = news_aggregator  
+                    self.sentiment_fusion = sentiment_fusion
+                
                 async def fuse_sentiment(self, symbol):
-                    from datetime import datetime
+                    """Get sentiment from all sources and fuse them"""
+                    sentiment_data = {}
                     
-                    # Mock sentiment result
-                    class MockSentimentResult:
-                        def __init__(self):
-                            self.score = 0.1
-                            self.confidence = 0.5
-                            self.sources = ['mock']
-                            self.timestamp = datetime.now()
+                    # Get Reddit sentiment
+                    try:
+                        reddit_result = await self.reddit_analyzer.analyze_symbol(symbol)
+                        if reddit_result:
+                            sentiment_data['reddit'] = reddit_result
+                    except Exception as e:
+                        logger.warning(f"Reddit sentiment failed for {symbol}: {e}")
                     
-                    return MockSentimentResult()
+                    # Get News sentiment  
+                    try:
+                        news_result = self.news_aggregator.analyze_symbol(symbol)
+                        if news_result:
+                            sentiment_data['news'] = news_result
+                    except Exception as e:
+                        logger.warning(f"News sentiment failed for {symbol}: {e}")
+                    
+                    # Fuse sentiments if we have any data
+                    if sentiment_data:
+                        fused_result = self.sentiment_fusion.fuse_sentiment(sentiment_data, symbol)
+                        
+                        # Convert to expected format
+                        class FusedSentimentResult:
+                            def __init__(self, fused_data):
+                                self.score = fused_data.get('sentiment_score', 0.0)
+                                self.confidence = fused_data.get('confidence', 0.0)
+                                self.sources = list(sentiment_data.keys())
+                                self.timestamp = datetime.now()
+                        
+                        return FusedSentimentResult(fused_result)
+                    else:
+                        # Return neutral sentiment if no data
+                        class NeutralSentimentResult:
+                            def __init__(self):
+                                self.score = 0.0
+                                self.confidence = 0.0
+                                self.sources = []
+                                self.timestamp = datetime.now()
+                        
+                        return NeutralSentimentResult()
                 
                 async def get_aggregated_sentiment(self, symbols):
                     """For backward compatibility with connectivity check"""
+                    result = await self.fuse_sentiment(symbols[0] if symbols else 'AAPL')
                     return {
-                        'sentiment_score': 0.1,
-                        'confidence': 0.5,
-                        'sources': ['mock'],
-                        'timestamp': datetime.now()
+                        'sentiment_score': result.score,
+                        'confidence': result.confidence,
+                        'sources': result.sources,
+                        'timestamp': result.timestamp
                     }
             
-            self.sentiment_analyzer = MockSentimentAnalyzer()
+            self.sentiment_analyzer = SentimentManager(reddit_analyzer, news_aggregator, self.sentiment_fusion)
             
             # 4. Initialize feature pipeline
             logger.info("Initializing feature pipeline...")
@@ -201,9 +268,31 @@ class QuantumSentimentBot:
             
             # 7. Initialize risk engine
             logger.info("Initializing risk engine...")
-            self.risk_engine = RiskEngine(self.config.risk)
+            # Create RiskConfig from main config
+            risk_config = RiskConfig(
+                max_portfolio_var=getattr(self.config.risk, 'max_portfolio_var', 0.02),
+                max_position_weight=getattr(self.config.risk, 'max_position_weight', 0.1),
+                max_total_drawdown=getattr(self.config.risk, 'max_drawdown', 0.2),
+                max_daily_drawdown=getattr(self.config.risk, 'max_daily_drawdown', 0.02),
+                max_leverage=getattr(self.config.risk, 'max_leverage', 1.0),
+                enable_circuit_breakers=True
+            )
+            self.risk_engine = RiskEngine(risk_config)
             
-            # 8. Initialize execution router
+            # 8. Initialize position sizer
+            logger.info("Initializing position sizer...")
+            position_sizing_config = PositionSizingConfig(
+                use_kelly_criterion=True,
+                kelly_fraction=0.25,
+                max_position_size=0.1,
+                min_position_size=0.005,
+                enable_confidence_scaling=True,
+                enable_volatility_scaling=True,
+                enable_momentum_scaling=True
+            )
+            self.position_sizer = PositionSizer(position_sizing_config)
+            
+            # 9. Initialize execution router
             logger.info("Initializing execution router...")
             routing_config = RoutingConfig(
                 enable_dynamic_strategy_selection=True,
@@ -212,20 +301,20 @@ class QuantumSentimentBot:
             )
             self.execution_router = SmartOrderRouter(routing_config)
             
-            # 9. Initialize broker components
+            # 10. Initialize broker components
             logger.info("Initializing broker components...")
             await self._initialize_broker()
             
-            # 10. Initialize dynamic symbol discovery
+            # 11. Initialize dynamic symbol discovery
             logger.info("Initializing dynamic symbol discovery...")
             await self._initialize_dynamic_discovery()
             
-            # 11. Verify connectivity
+            # 12. Verify connectivity
             logger.info("Verifying system connectivity...")
             if not await self._verify_connectivity():
                 raise RuntimeError("System connectivity check failed")
             
-            # 12. Log strategy configuration
+            # 13. Log strategy configuration
             self._log_strategy_configuration()
             
             logger.info("System initialization completed successfully")
@@ -458,10 +547,10 @@ class QuantumSentimentBot:
             else:
                 logger.info("⏭️ Skipping predictions (generated within last 5 minutes)")
             
-            # 3. Check risk limits
-            logger.info("⚠️ Checking risk limits...")
+            # 3. Check comprehensive risk limits
+            logger.info("⚠️ Performing comprehensive risk assessment...")
             if not await self._check_risk_limits():
-                logger.warning("🛑 Risk limits exceeded, skipping trading")
+                logger.warning("🛑 Risk limits exceeded, trading halted for this cycle")
                 return
             
             # 4. Execute pending signals
@@ -722,33 +811,226 @@ class QuantumSentimentBot:
                            error=str(e))
     
     async def _monitor_positions(self) -> None:
-        """Monitor existing positions and manage exits"""
+        """Monitor existing positions with comprehensive risk management"""
         
         positions = self.position_tracker.get_all_positions()
+        active_positions = [p for p in positions if not p.is_flat]
         
-        for position in positions:
-            if position.is_flat:
-                continue
-            
+        if not active_positions:
+            logger.debug("No active positions to monitor")
+            return
+        
+        logger.info(f"Monitoring {len(active_positions)} active positions")
+        
+        # Perform position-level risk monitoring
+        for position in active_positions:
             try:
-                # Check stop loss
-                if await self.risk_engine.check_stop_loss(position):
-                    await self._close_position(position, "stop_loss")
+                # Enhanced stop loss check using RiskEngine
+                if hasattr(self.risk_engine, 'check_stop_loss'):
+                    try:
+                        if await self.risk_engine.check_stop_loss(position):
+                            logger.info(f"Stop loss triggered for {position.symbol}")
+                            await self._close_position(position, "stop_loss")
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Risk engine stop loss check failed for {position.symbol}: {e}")
+                        # Fallback to basic stop loss check
+                        if await self._basic_stop_loss_check(position):
+                            await self._close_position(position, "basic_stop_loss")
+                            continue
+                else:
+                    # Basic stop loss if RiskEngine doesn't have the method
+                    if await self._basic_stop_loss_check(position):
+                        await self._close_position(position, "basic_stop_loss")
+                        continue
+                
+                # Enhanced take profit check using RiskEngine
+                if hasattr(self.risk_engine, 'check_take_profit'):
+                    try:
+                        if await self.risk_engine.check_take_profit(position):
+                            logger.info(f"Take profit triggered for {position.symbol}")
+                            await self._close_position(position, "take_profit")
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Risk engine take profit check failed for {position.symbol}: {e}")
+                        # Fallback to basic take profit check
+                        if await self._basic_take_profit_check(position):
+                            await self._close_position(position, "basic_take_profit")
+                            continue
+                else:
+                    # Basic take profit if RiskEngine doesn't have the method
+                    if await self._basic_take_profit_check(position):
+                        await self._close_position(position, "basic_take_profit")
+                        continue
+                
+                # Position-specific risk monitoring
+                position_risk = await self._assess_position_risk(position)
+                if position_risk.get('critical_risk', False):
+                    logger.warning(f"Critical risk detected for {position.symbol}",
+                                 risk_factors=position_risk.get('risk_factors', []))
+                    await self._close_position(position, "risk_management")
                     continue
                 
-                # Check take profit
-                if await self.risk_engine.check_take_profit(position):
-                    await self._close_position(position, "take_profit")
-                    continue
-                
-                # Check for exit signals
+                # Check for exit signals (strategy-based)
                 if await self._should_exit_position(position):
                     await self._close_position(position, "exit_signal")
+                    continue
+                
+                # Log position health
+                logger.debug(f"Position {position.symbol} monitored - Status: OK",
+                           pnl=position.unrealized_pnl,
+                           risk_score=position_risk.get('risk_score', 0))
                 
             except Exception as e:
                 logger.error("Error monitoring position",
                            symbol=position.symbol,
                            error=str(e))
+        
+        # Portfolio-level risk monitoring (every 10 cycles to avoid over-computation)
+        if hasattr(self, '_monitoring_cycle_count'):
+            self._monitoring_cycle_count += 1
+        else:
+            self._monitoring_cycle_count = 1
+        
+        if self._monitoring_cycle_count % 10 == 0:
+            await self._portfolio_risk_monitoring()
+    
+    async def _basic_stop_loss_check(self, position) -> bool:
+        """Basic stop loss check when RiskEngine method not available"""
+        
+        try:
+            # Simple percentage-based stop loss
+            stop_loss_pct = getattr(self.config.risk, 'stop_loss_pct', 0.05)  # 5% default
+            
+            if position.is_long:
+                loss_pct = (position.average_price - position.current_price) / position.average_price
+            else:
+                loss_pct = (position.current_price - position.average_price) / position.average_price
+            
+            return loss_pct > stop_loss_pct
+            
+        except Exception as e:
+            logger.error(f"Error in basic stop loss check: {e}")
+            return False
+    
+    async def _basic_take_profit_check(self, position) -> bool:
+        """Basic take profit check when RiskEngine method not available"""
+        
+        try:
+            # Simple percentage-based take profit
+            take_profit_pct = getattr(self.config.risk, 'take_profit_pct', 0.15)  # 15% default
+            
+            if position.is_long:
+                profit_pct = (position.current_price - position.average_price) / position.average_price
+            else:
+                profit_pct = (position.average_price - position.current_price) / position.average_price
+            
+            return profit_pct > take_profit_pct
+            
+        except Exception as e:
+            logger.error(f"Error in basic take profit check: {e}")
+            return False
+    
+    async def _assess_position_risk(self, position) -> Dict[str, Any]:
+        """Assess risk for individual position"""
+        
+        try:
+            risk_factors = []
+            risk_score = 0
+            
+            # Check position size relative to portfolio
+            account = await self.broker.get_account()
+            equity = float(account.equity)
+            position_value = abs(position.quantity * position.current_price)
+            position_weight = position_value / equity if equity > 0 else 0
+            
+            if position_weight > 0.15:  # 15% position limit
+                risk_factors.append("oversized_position")
+                risk_score += 30
+            
+            # Check unrealized P&L
+            pnl_pct = position.unrealized_pnl / position_value if position_value > 0 else 0
+            if pnl_pct < -0.1:  # 10% loss
+                risk_factors.append("large_unrealized_loss")
+                risk_score += 25
+            
+            # Check position age
+            if position.opened_at:
+                position_age = datetime.now() - position.opened_at
+                if position_age > timedelta(days=7):  # Long-held positions
+                    risk_factors.append("stale_position")
+                    risk_score += 10
+            
+            # Check volatility (if we can get recent data)
+            try:
+                bars = await self.broker.get_bars(
+                    position.symbol,
+                    timeframe="1Hour",
+                    limit=24
+                )
+                
+                if not bars.empty:
+                    returns = bars['close'].pct_change().dropna()
+                    volatility = returns.std()
+                    
+                    if volatility > 0.03:  # 3% hourly volatility threshold
+                        risk_factors.append("high_volatility")
+                        risk_score += 15
+            except Exception:
+                pass  # Skip volatility check if data unavailable
+            
+            return {
+                'risk_score': risk_score,
+                'risk_factors': risk_factors,
+                'critical_risk': risk_score > 50,  # Critical if score > 50
+                'position_weight': position_weight,
+                'pnl_percent': pnl_pct
+            }
+            
+        except Exception as e:
+            logger.error(f"Error assessing position risk for {position.symbol}: {e}")
+            return {'risk_score': 0, 'risk_factors': [], 'critical_risk': False}
+    
+    async def _portfolio_risk_monitoring(self) -> None:
+        """Periodic comprehensive portfolio risk monitoring"""
+        
+        try:
+            positions = self.position_tracker.get_all_positions()
+            active_positions = [p for p in positions if not p.is_flat]
+            
+            if not active_positions:
+                return
+            
+            # Get account info
+            account = await self.broker.get_account()
+            equity = float(account.equity)
+            
+            # Calculate portfolio metrics
+            total_exposure = sum(abs(p.quantity * p.current_price) for p in active_positions)
+            leverage = total_exposure / equity if equity > 0 else 0
+            
+            # Portfolio concentration check
+            position_weights = [(abs(p.quantity * p.current_price) / equity, p.symbol) 
+                              for p in active_positions]
+            max_weight, max_symbol = max(position_weights) if position_weights else (0, "")
+            
+            # Log portfolio risk summary
+            logger.info("Portfolio risk monitoring summary",
+                       active_positions=len(active_positions),
+                       total_leverage=f"{leverage:.2f}x",
+                       max_position_weight=f"{max_weight:.1%}",
+                       max_position_symbol=max_symbol)
+            
+            # Warnings for concerning metrics
+            if leverage > 0.8:  # 80% leverage warning
+                logger.warning("High portfolio leverage detected", leverage=f"{leverage:.2f}x")
+            
+            if max_weight > 0.2:  # 20% concentration warning
+                logger.warning("High position concentration", 
+                             symbol=max_symbol, weight=f"{max_weight:.1%}")
+            
+        except Exception as e:
+            logger.error(f"Error in portfolio risk monitoring: {e}")
     
     async def _execute_order(
         self,
@@ -835,41 +1117,235 @@ class QuantumSentimentBot:
         return True
     
     async def _calculate_position_size(self, signal: Dict[str, Any]) -> float:
-        """Calculate position size using risk engine"""
+        """Calculate position size using advanced PositionSizer with Kelly Criterion"""
         
-        account = await self.broker.get_account()
-        equity = float(account.equity)
+        try:
+            # Get current account value
+            account = await self.broker.get_account()
+            equity = float(account.equity)
+            
+            # Prepare signals dictionary for the position sizer
+            signals = {signal['symbol']: signal['strength'] if signal['signal'] == 'buy' else -signal['strength']}
+            
+            # Get confidence scores
+            confidence_scores = {signal['symbol']: signal['confidence']}
+            
+            # Get current positions for the position sizer
+            positions = self.position_tracker.get_all_positions()
+            current_positions = {}
+            for pos in positions:
+                if not pos.is_flat:
+                    # Convert position to weight (normalized by portfolio value)
+                    position_weight = (pos.quantity * pos.current_price) / equity if equity > 0 else 0
+                    current_positions[pos.symbol] = position_weight
+            
+            # Get historical returns data for the symbol
+            try:
+                # Fetch recent historical data for returns calculation
+                bars = await self.broker.get_bars(
+                    signal['symbol'],
+                    timeframe="1Day",
+                    limit=252  # 1 year of daily data for Kelly calculation
+                )
+                
+                if not bars.empty and len(bars) > 30:
+                    # Calculate returns
+                    returns_data = bars[['close']].pct_change().dropna()
+                    returns_data.columns = [signal['symbol']]
+                    
+                    # Use the position sizer to calculate optimal size
+                    sizing_result = self.position_sizer.calculate_position_sizes(
+                        signals=signals,
+                        returns_data=returns_data,
+                        current_positions=current_positions,
+                        confidence_scores=confidence_scores,
+                        portfolio_value=equity
+                    )
+                    
+                    # Extract the position size for our symbol
+                    position_weight = sizing_result['position_sizes'].get(signal['symbol'], 0)
+                    
+                    # Convert weight to dollar amount
+                    position_value = abs(position_weight) * equity
+                    
+                    # Get current price
+                    quote = await self.broker.get_latest_quote(signal['symbol'])
+                    if not quote:
+                        logger.warning(f"No quote available for {signal['symbol']}, falling back to simple sizing")
+                        return await self._calculate_simple_position_size(signal, equity)
+                    
+                    price = (quote['bid'] + quote['ask']) / 2
+                    quantity = int(position_value / price)
+                    
+                    logger.info(f"Position sizing for {signal['symbol']}", 
+                               kelly_weight=position_weight,
+                               position_value=position_value,
+                               quantity=quantity,
+                               sizing_method='kelly_criterion')
+                    
+                    return max(0, quantity)
+                    
+                else:
+                    logger.warning(f"Insufficient historical data for {signal['symbol']}, using simple sizing")
+                    return await self._calculate_simple_position_size(signal, equity)
+                    
+            except Exception as data_error:
+                logger.warning(f"Failed to get historical data for Kelly sizing: {data_error}, falling back to simple sizing")
+                return await self._calculate_simple_position_size(signal, equity)
+                
+        except Exception as e:
+            logger.error(f"Error in advanced position sizing: {e}, falling back to simple sizing")
+            return await self._calculate_simple_position_size(signal, await self.broker.get_account().equity)
+    
+    async def _calculate_simple_position_size(self, signal: Dict[str, Any], equity: float) -> float:
+        """Fallback simple position sizing method"""
         
-        # Use Kelly Criterion or fixed percentage
-        risk_per_trade = self.config.risk.risk_per_trade
-        position_value = equity * risk_per_trade
-        
-        # Get current price
-        quote = await self.broker.get_latest_quote(signal['symbol'])
-        if not quote:
+        try:
+            # Use fixed percentage risk
+            risk_per_trade = self.config.risk.risk_per_trade
+            position_value = equity * risk_per_trade
+            
+            # Get current price
+            quote = await self.broker.get_latest_quote(signal['symbol'])
+            if not quote:
+                return 0
+            
+            price = (quote['bid'] + quote['ask']) / 2
+            quantity = int(position_value / price)
+            
+            logger.info(f"Simple position sizing for {signal['symbol']}", 
+                       position_value=position_value,
+                       quantity=quantity,
+                       sizing_method='fixed_percentage')
+            
+            return max(0, quantity)
+            
+        except Exception as e:
+            logger.error(f"Error in simple position sizing: {e}")
             return 0
-        
-        price = (quote['bid'] + quote['ask']) / 2
-        quantity = int(position_value / price)
-        
-        return max(0, quantity)
     
     async def _check_risk_limits(self) -> bool:
-        """Check if we're within risk limits"""
+        """Comprehensive risk limits check using full RiskEngine capabilities"""
         
-        # Get current metrics
-        portfolio_metrics = self.position_tracker.get_portfolio_summary()
+        try:
+            # Get current positions for risk assessment
+            positions = self.position_tracker.get_all_positions()
+            account = await self.broker.get_account()
+            equity = float(account.equity)
+            
+            # Convert positions to weights for risk engine
+            position_weights = {}
+            for pos in positions:
+                if not pos.is_flat:
+                    position_value = pos.quantity * pos.current_price
+                    weight = position_value / equity if equity > 0 else 0
+                    position_weights[pos.symbol] = weight
+            
+            if not position_weights:
+                logger.info("No positions to assess risk for")
+                return True  # No positions = no risk
+            
+            # Get historical returns data for risk assessment
+            symbols = list(position_weights.keys())
+            returns_data_list = []
+            
+            for symbol in symbols:
+                try:
+                    bars = await self.broker.get_bars(
+                        symbol,
+                        timeframe="1Day",
+                        limit=252  # 1 year of data for VaR
+                    )
+                    
+                    if not bars.empty:
+                        returns = bars[['close']].pct_change().dropna()
+                        returns.columns = [symbol]
+                        returns_data_list.append(returns)
+                except Exception as e:
+                    logger.warning(f"Could not fetch returns data for {symbol}: {e}")
+            
+            if not returns_data_list:
+                logger.warning("No returns data available for risk assessment, using basic checks")
+                return await self._basic_risk_check()
+            
+            # Combine returns data
+            returns_df = pd.concat(returns_data_list, axis=1).fillna(0)
+            
+            # Perform comprehensive risk assessment
+            risk_assessment = self.risk_engine.assess_portfolio_risk(
+                positions=position_weights,
+                returns=returns_df
+            )
+            
+            # Log risk assessment summary
+            risk_score = risk_assessment.get('overall_risk_score', 0)
+            alerts = risk_assessment.get('risk_alerts', [])
+            
+            logger.info(f"Portfolio risk assessment completed",
+                       risk_score=risk_score,
+                       alerts_count=len(alerts),
+                       critical_alerts=len([a for a in alerts if a['severity'] == 'CRITICAL']))
+            
+            # Check for critical risk limit breaches
+            critical_alerts = [a for a in alerts if a['severity'] == 'CRITICAL']
+            if critical_alerts:
+                logger.error("CRITICAL RISK ALERTS DETECTED - Trading halted",
+                           alerts=[a['message'] for a in critical_alerts])
+                return False
+            
+            # Check overall risk score threshold
+            if risk_score > 85:  # High risk threshold
+                logger.warning("High portfolio risk score detected", risk_score=risk_score)
+                return False
+            
+            # Check specific limit utilization
+            limit_util = risk_assessment.get('limit_utilization', {})
+            
+            # Fail if any limit is significantly breached
+            for limit_name, limit_data in limit_util.items():
+                if limit_data.get('breach', False):
+                    logger.error(f"Risk limit breached: {limit_name}", 
+                               current=limit_data.get('current'),
+                               limit=limit_data.get('limit'))
+                    return False
+                
+                # Warning for high utilization
+                if limit_data.get('utilization', 0) > 0.9:
+                    logger.warning(f"Risk limit high utilization: {limit_name}",
+                                 utilization=f"{limit_data['utilization']:.1%}")
+            
+            logger.info("✅ All risk limits within acceptable ranges")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in comprehensive risk check: {e}, falling back to basic check")
+            return await self._basic_risk_check()
+    
+    async def _basic_risk_check(self) -> bool:
+        """Fallback basic risk checking when comprehensive assessment fails"""
         
-        # Check drawdown
-        if portfolio_metrics.get('max_position_loss', 0) < -self.config.risk.max_drawdown:
+        try:
+            # Get current metrics
+            portfolio_metrics = self.position_tracker.get_portfolio_summary()
+            
+            # Check drawdown
+            max_loss = portfolio_metrics.get('max_position_loss', 0)
+            if max_loss < -self.config.risk.max_drawdown:
+                logger.warning("Basic risk check: Max drawdown exceeded", max_loss=max_loss)
+                return False
+            
+            # Check daily loss
+            account_status = self.account_monitor.get_current_status()
+            daily_return = account_status.get('performance_metrics', {}).get('daily_return_percent', 0)
+            if daily_return < -5:
+                logger.warning("Basic risk check: Daily loss limit exceeded", daily_return=daily_return)
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in basic risk check: {e}")
             return False
-        
-        # Check daily loss
-        account_status = self.account_monitor.get_current_status()
-        if account_status.get('performance_metrics', {}).get('daily_return_percent', 0) < -5:
-            return False
-        
-        return True
     
     async def _check_market_conditions(self, symbol: str) -> bool:
         """Check if market conditions are favorable"""
