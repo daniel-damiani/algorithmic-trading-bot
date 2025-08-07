@@ -116,6 +116,10 @@ class SimulatedBroker:
         self.trade_history: List[Trade] = []
         self.equity_history: List[Dict[str, Any]] = []
         
+        # Risk management tracking
+        self._daily_start_equity = initial_capital
+        self._current_date = None
+        
         # Connection state
         self.is_connected = False
         
@@ -130,8 +134,20 @@ class SimulatedBroker:
         logger.info(f"Historical data loaded for {len(data)} symbols")
     
     def set_current_time(self, timestamp: datetime) -> None:
-        """Update current simulation time"""
+        """Update current simulation time and handle daily resets"""
         self.current_time = timestamp
+        
+        # Check if we've moved to a new trading day
+        current_date = timestamp.date()
+        if self._current_date is None:
+            self._current_date = current_date
+            self._daily_start_equity = self.equity
+        elif self._current_date != current_date:
+            # New trading day - reset daily tracking
+            self._current_date = current_date
+            self._daily_start_equity = self.equity
+            logger.debug("New trading day", date=current_date, starting_equity=self.equity)
+        
         self._update_positions_value()
         self._record_equity_snapshot()
     
@@ -185,25 +201,37 @@ class SimulatedBroker:
         Returns data up to current simulation time
         """
         if symbol not in self.historical_data:
+            logger.warning(f"Symbol {symbol} not in historical data")
             return None
         
         data = self.historical_data[symbol].copy()
         
-        # Filter data up to current simulation time
-        if self.current_time:
-            data = data[data.index <= self.current_time]
+        # Filter data up to current simulation time (use end parameter if provided, otherwise current_time)
+        filter_time = end if end is not None else self.current_time
+        if filter_time:
+            data = data[data.index <= filter_time]
+            logger.debug(f"Filtered data to {filter_time}, remaining: {len(data)} bars")
         
         # Apply date filters
         if start:
             data = data[data.index >= start]
-        if end:
-            data = data[data.index <= end]
+            logger.debug(f"Applied start filter {start}, remaining: {len(data)} bars")
         
-        # Apply limit
+        # Apply limit - but make sure we return data even if less than limit
         if limit and len(data) > limit:
+            # Get the last 'limit' bars up to the current time
             data = data.tail(limit)
+            logger.debug(f"Applied limit {limit}, returning last {limit} bars")
+        elif limit:
+            # If we have less data than limit, still return what we have
+            logger.debug(f"Requested {limit} bars, but only {len(data)} available")
         
-        return data if not data.empty else None
+        if data.empty:
+            logger.info(f"No data for {symbol} at time {filter_time}")
+            return None
+            
+        logger.debug(f"Returning {len(data)} bars for {symbol} from {data.index.min()} to {data.index.max()}")
+        return data
     
     async def get_latest_quote(self, symbol: str) -> Optional[Dict[str, float]]:
         """Get latest quote for symbol at current simulation time"""

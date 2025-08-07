@@ -137,14 +137,9 @@ python backtest.py --config config/config_small_data.yaml --start-date 2024-01-0
 ### Model Training (Advanced)
 
 ```bash
-# Quick training for testing (30 min)
-python train_production.py --quick-start --symbols 10
-
-# Full production training (3-6 hours)  
-python train_production.py --symbols 50 --epochs 500
-
-# Train specific models only
-python train_production.py --models xgboost,lstm --symbols 30
+python training/train_simple_massive.py 
+# or 
+python training/train_binary_massive.py
 ```
 
 ## ⚙️ Configuration Guide

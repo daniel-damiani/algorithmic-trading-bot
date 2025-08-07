@@ -68,7 +68,10 @@ class PerformanceAnalyzer:
         # Convert equity curve to DataFrame
         if equity_curve:
             self.equity_df = pd.DataFrame(equity_curve)
-            self.equity_df.set_index('timestamp', inplace=True)
+            if 'timestamp' in self.equity_df.columns:
+                # Handle timezone-aware datetime conversion properly
+                self.equity_df['timestamp'] = pd.to_datetime(self.equity_df['timestamp'], utc=True)
+                self.equity_df.set_index('timestamp', inplace=True)
         else:
             self.equity_df = pd.DataFrame()
         
@@ -298,7 +301,7 @@ class PerformanceAnalyzer:
             return {}
         
         # Resample to monthly and calculate returns
-        monthly_equity = self.equity_df['equity'].resample('M').last()
+        monthly_equity = self.equity_df['equity'].resample('ME').last()
         monthly_returns = monthly_equity.pct_change().dropna()
         
         return {str(date.date()): return_val for date, return_val in monthly_returns.items()}

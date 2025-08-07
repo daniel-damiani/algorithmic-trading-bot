@@ -343,6 +343,13 @@ class QuantumSentimentBot:
             self.broker = self._injected_broker
             logger.info("Using injected broker for backtesting")
             
+            # Initialize position tracker for backtest mode
+            position_config = PositionTrackerConfig(
+                max_positions=50,
+                enable_real_time_pnl=False  # Disabled for backtest
+            )
+            self.position_tracker = PositionTracker(position_config)
+            
             # Connect to simulated broker
             if not await self.broker.connect():
                 raise RuntimeError("Failed to connect to simulated broker")
@@ -402,103 +409,86 @@ class QuantumSentimentBot:
             self.dynamic_discovery = None
     
     async def _load_ensemble_model(self, persistence: ModelPersistence) -> Any:
-        """Load the trained ensemble model or best individual model"""
+        """Load the best performing trained model - SimpleBalanced prioritized for stability"""
         
+        model_load_errors = []
+        
+        # PRIORITY: Load SimpleBalanced model first (most stable and balanced)
         try:
-            # First try to load the complete StackedEnsemble
-            ensemble, metadata = persistence.load_model('StackedEnsemble')
-            logger.info("Loaded trained StackedEnsemble successfully", 
-                       version=metadata.version,
-                       metrics=metadata.metrics)
-            return ensemble
-        except Exception as e:
-            logger.warning(f"Could not load StackedEnsemble: {e}")
+            from src.models.simple_balanced_wrapper import SimpleBalancedModel
+            model = SimpleBalancedModel()
             
-        # Fallback: Try to load individual models
-        model_names = ['MarketRegimeXGBoost', 'XGBoost', 'xgboost_model']
-        for model_name in model_names:
+            logger.info("Loaded SimpleBalanced model successfully (BALANCED PREDICTIONS)", 
+                       features=len(model.feature_names))
+            
+            # Verify the model has required methods
+            if not hasattr(model, 'predict_proba'):
+                raise RuntimeError(f"SimpleBalanced model missing predict_proba method")
+            
+            return model
+            
+        except Exception as e:
+            model_load_errors.append(f"MarketRegimeXGBoost: {e}")
+            logger.error(f"Failed to load MarketRegimeXGBoost (best model): {e}")
+        
+        # FALLBACK: Try other individual models if MarketRegimeXGBoost fails
+        fallback_models = ['XGBoost', 'xgboost_model']
+        for model_name in fallback_models:
             try:
                 model, metadata = persistence.load_model(model_name)
+                
+                # Fix metadata compatibility if needed
+                if not hasattr(metadata, 'metrics'):
+                    logger.warning(f"ModelMetadata for {model_name} missing 'metrics' attribute - adding empty metrics")
+                    metadata.metrics = getattr(metadata, 'test_metrics', {})
+                
                 logger.info(f"Loaded {model_name} model as fallback", 
-                           version=metadata.version if hasattr(metadata, 'version') else 'unknown',
-                           metrics=metadata.metrics if hasattr(metadata, 'metrics') else {})
+                           version=getattr(metadata, 'version', 'unknown'),
+                           metrics=getattr(metadata, 'metrics', {}))
                 
-                # Wrap in a simple interface that matches ensemble expectations
-                class XGBoostWrapper:
-                    def __init__(self, model):
-                        self.model = model
-                        self.is_trained = True
-                        self.model_type = type(model).__name__
-                    
-                    def predict(self, features):
-                        # Handle different model types
-                        try:
-                            if self.model_type == 'MarketRegimeXGBoost':
-                                # This model expects OHLCV data, not features
-                                # We need to use a different approach - try to use the model's internal prediction
-                                # if it has a trained XGBoost model inside
-                                if hasattr(self.model, 'model') and hasattr(self.model.model, 'predict'):
-                                    # Try to predict using the internal XGBoost model with features
-                                    pred = self.model.model.predict(features.values)
-                                else:
-                                    # Fallback: return neutral signal
-                                    logger.warning(f"Cannot predict with {self.model_type} - returning neutral")
-                                    return 0.0
-                            else:
-                                # Regular XGBoost model
-                                pred = self.model.predict(features)
-                            
-                            # Convert class predictions to signal strength
-                            # Classes: 0=Strong Down, 1=Down, 2=Neutral, 3=Up, 4=Strong Up
-                            signal_map = {0: -1.0, 1: -0.5, 2: 0.0, 3: 0.5, 4: 1.0}
-                            if hasattr(pred, '__iter__'):
-                                return np.array([signal_map.get(int(p), 0.0) for p in pred])
-                            else:
-                                return signal_map.get(int(pred), 0.0)
-                        except Exception as e:
-                            logger.warning(f"Prediction failed with {self.model_type}: {e} - returning neutral")
-                            return 0.0
-                    
-                    def predict_proba(self, features):
-                        try:
-                            if self.model_type == 'MarketRegimeXGBoost':
-                                # Try to use internal model for probabilities
-                                if hasattr(self.model, 'model') and hasattr(self.model.model, 'predict_proba'):
-                                    return self.model.model.predict_proba(features.values)
-                                else:
-                                    # Fallback: return neutral probabilities
-                                    return np.array([[0.2, 0.2, 0.2, 0.2, 0.2]])
-                            else:
-                                if hasattr(self.model, 'predict_proba'):
-                                    return self.model.predict_proba(features)
-                        except Exception as e:
-                            logger.warning(f"Probability prediction failed: {e}")
-                            
-                        # Final fallback
-                        pred = self.predict(features)
-                        if hasattr(pred, '__iter__'):
-                            # Multi-class case - return uniform probabilities
-                            return np.array([[0.2, 0.2, 0.2, 0.2, 0.2]])
-                        else:
-                            # Binary case
-                            return np.array([[1-abs(pred), abs(pred)]])
+                # Verify the model has a predict method
+                if not hasattr(model, 'predict'):
+                    raise RuntimeError(f"{model_name} model missing predict method. Available methods: {[m for m in dir(model) if not m.startswith('_')]}")
                 
-                return XGBoostWrapper(model)
+                return model
+                
             except Exception as e:
-                logger.debug(f"Could not load {model_name}: {e}")
+                model_load_errors.append(f"{model_name}: {e}")
+                logger.error(f"Failed to load {model_name}: {e}")
                 continue
         
-        # If we reach here, no models were loaded
-        logger.error("CRITICAL: No trained models available - cannot trade!")
-        # Return a dummy model that refuses to trade
-        class NoModelAvailable:
-            def __init__(self):
-                self.is_trained = False
+        # LAST RESORT: Try StackedEnsemble (has config issues but might work)
+        try:
+            ensemble, metadata = persistence.load_model('StackedEnsemble')
             
-            def predict(self, features):
-                raise RuntimeError("No trained model available")
+            # Fix the metadata compatibility issue
+            if not hasattr(metadata, 'metrics'):
+                logger.warning("ModelMetadata missing 'metrics' attribute - adding empty metrics")
+                metadata.metrics = getattr(metadata, 'test_metrics', {})
+            
+            logger.warning("Using StackedEnsemble as last resort (may have config issues)")
+            
+            # Verify the model has a predict method
+            if not hasattr(ensemble, 'predict'):
+                raise RuntimeError(f"StackedEnsemble model missing predict method. Available methods: {[m for m in dir(ensemble) if not m.startswith('_')]}")
+            
+            return ensemble
+            
+        except Exception as e:
+            model_load_errors.append(f"StackedEnsemble: {e}")
+            logger.error(f"Failed to load StackedEnsemble: {e}")
         
-        return NoModelAvailable()
+        # If we reach here, NO models were loaded successfully
+        error_summary = "\n".join([f"  - {error}" for error in model_load_errors])
+        logger.critical("CRITICAL ERROR: No trained models could be loaded!")
+        logger.critical(f"Model loading errors:\n{error_summary}")
+        
+        raise RuntimeError(
+            f"TRADING SYSTEM CANNOT START: No trained models available!\n"
+            f"Attempted to load models but all failed:\n{error_summary}\n\n"
+            f"SOLUTION: Retrain your models or fix the model loading issues.\n"
+            f"DO NOT TRADE WITHOUT PROPER MODELS - This prevents accidental trading with hardcoded signals."
+        )
     
     async def _verify_connectivity(self) -> bool:
         """Verify all external connections"""
@@ -522,6 +512,10 @@ class QuantumSentimentBot:
     async def _check_market_data(self) -> bool:
         """Check market data connectivity"""
         try:
+            # Skip market data check in backtest mode - simulated broker doesn't need connectivity
+            if self.mode == TradingMode.BACKTEST:
+                return True
+            
             # Test with SPY quote
             quote = await self.broker.get_latest_quote("SPY")
             return quote is not None
@@ -532,6 +526,10 @@ class QuantumSentimentBot:
     async def _check_sentiment_sources(self) -> bool:
         """Check sentiment data sources"""
         try:
+            # Skip sentiment check in backtest mode - use simulated sentiment
+            if self.mode == TradingMode.BACKTEST:
+                return True
+            
             # Test sentiment analysis on a sample ticker
             sentiment = await self.sentiment_analyzer.get_aggregated_sentiment(["AAPL"])
             return sentiment is not None
@@ -636,7 +634,7 @@ class QuantumSentimentBot:
             timestamp: Current simulation timestamp
         """
         
-        logger.debug(f"🔄 BACKTEST CYCLE - {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"🔄 BACKTEST CYCLE - {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
         
         try:
             # 1. Generate predictions for current timestamp
@@ -671,10 +669,11 @@ class QuantumSentimentBot:
             timestamp: Current simulation timestamp
         """
         
-        logger.debug("🧠 Generating backtest predictions...")
+        logger.info(f"🧠 Generating backtest predictions for {len(symbols)} symbols at {timestamp}")
         
         # Get market data for all symbols up to current timestamp
         for symbol in symbols:
+            logger.info(f"🔍 Processing symbol: {symbol}")
             try:
                 # Get market data up to current timestamp
                 bars = await self.broker.get_bars(
@@ -685,15 +684,19 @@ class QuantumSentimentBot:
                 )
                 
                 if bars is None or bars.empty:
-                    logger.debug(f"⚠️ No market data for {symbol} at {timestamp}")
+                    logger.info(f"⚠️ No market data for {symbol} at {timestamp}")
                     continue
                 
-                # Ensure we have enough data
-                if len(bars) < 50:  # Need minimum bars for technical indicators
-                    logger.debug(f"⚠️ Insufficient data for {symbol} ({len(bars)} bars)")
+                logger.info(f"✅ Got {len(bars)} bars for {symbol}")
+                
+                # Ensure we have enough data (reduced from 50 to 20 for shorter backtests)
+                if len(bars) < 20:  # Need minimum bars for technical indicators
+                    logger.info(f"⚠️ Insufficient data for {symbol} ({len(bars)} bars)")
                     continue
                 
-                logger.debug(f"🔍 Analyzing {symbol} with {len(bars)} bars...")
+                logger.info(f"✅ Sufficient data for {symbol} ({len(bars)} bars >= 20)")
+                
+                logger.info(f"🔍 Analyzing {symbol} with {len(bars)} bars...")
                 
                 # Get sentiment data (simplified for backtesting)
                 sentiment_dict = {
@@ -707,6 +710,7 @@ class QuantumSentimentBot:
                 sentiment_df.set_index('timestamp', inplace=True)
                 
                 # Generate features
+                logger.info(f"🔧 Generating features for {symbol}")
                 feature_result = self.feature_pipeline.generate_features(
                     symbol=symbol,
                     market_data=bars,
@@ -714,52 +718,143 @@ class QuantumSentimentBot:
                 )
                 
                 features_dict = feature_result.get('features', {})
+                logger.info(f"📊 Generated {len(features_dict)} features for {symbol}")
                 if not features_dict:
+                    logger.info(f"❌ No features generated for {symbol}")
                     continue
                 
+                # Log some feature keys for debugging
+                feature_keys = list(features_dict.keys())[:10]
+                logger.debug(f"Feature keys sample: {feature_keys}")
+                logger.debug(f"Has 'close'? {'close' in features_dict}, Has 'price'? {'price' in features_dict}")
+                
+                # Add raw price data that the model might need
+                if 'close' not in features_dict and not bars.empty:
+                    features_dict['close'] = bars.iloc[-1]['close']
+                    features_dict['open'] = bars.iloc[-1]['open']
+                    features_dict['high'] = bars.iloc[-1]['high']
+                    features_dict['low'] = bars.iloc[-1]['low']
+                    features_dict['volume'] = bars.iloc[-1]['volume']
+                    logger.debug(f"Added raw price data: close={features_dict['close']}")
+                
                 # Convert to DataFrame for model prediction
-                import pandas as pd
                 features = pd.DataFrame([features_dict])
                 
                 # Get prediction from model
+                logger.info(f"🧠 Running model prediction for {symbol}")
                 try:
-                    if hasattr(self.ensemble_model, 'predict'):
-                        raw_prediction = self.ensemble_model.predict(features)
+                    # Add symbol_code feature to match training
+                    symbol_mapping = {'AAPL': 0, 'MSFT': 1, 'GOOGL': 2, 'AMZN': 3, 'TSLA': 4, 'NVDA': 5, 'META': 6}
+                    features_dict['symbol_code'] = symbol_mapping.get(symbol, 99)  # Default to 99 for unknown symbols
+                    
+                    # Recreate DataFrame with all features
+                    features = pd.DataFrame([features_dict])
+                    
+                    # Log features being passed to model
+                    logger.info(f"🔍 Features for {symbol}: {list(features.columns)[:5]}... (total: {features.shape[1]} features, {features.shape[0]} rows)")
+                    
+                    # Try to get a simple prediction - using predict_proba or predict
+                    raw_prediction = None
+                    
+                    # For classification models, get probability
+                    if hasattr(self.ensemble_model, 'predict_proba'):
+                        try:
+                            # Pass features directly to model - it will handle extraction
+                            probas = self.ensemble_model.predict_proba(features_dict)
+                            
+                            logger.info(f"🎯 Predict proba result: shape={probas.shape if hasattr(probas, 'shape') else 'no shape'}, values={probas}")
+                            if isinstance(probas, np.ndarray) and probas.size > 0:
+                                # For binary classification (0=bearish, 1=bullish)
+                                if probas.shape[1] == 2:
+                                    raw_prediction = probas[0, 1]  # Bullish probability
+                                    logger.info(f"🎯 Binary classification - bullish prob: {raw_prediction}")
+                                # For multi-class market regime
+                                elif probas.shape[1] >= 5:
+                                    # Assuming classes: strong_bear=0, bear=1, sideways=2, bull=3, strong_bull=4, volatile=5
+                                    bull_prob = probas[0, 3] if probas.shape[1] > 3 else 0.0
+                                    strong_bull_prob = probas[0, 4] if probas.shape[1] > 4 else 0.0
+                                    raw_prediction = bull_prob + strong_bull_prob  # Combined bullish probability
+                                    logger.info(f"🎯 Multi-class - bull: {bull_prob}, strong_bull: {strong_bull_prob}, combined: {raw_prediction}")
+                                else:
+                                    raw_prediction = probas[0, -1]  # Use last class as bullish
+                                    logger.info(f"🎯 Using last class probability: {raw_prediction}")
+                        except Exception as e:
+                            logger.warning(f"Predict proba failed: {e}")
+                            raw_prediction = None
+                    
+                    # Fallback to regular predict
+                    if raw_prediction is None and hasattr(self.ensemble_model, 'predict'):
+                        try:
+                            pred_result = self.ensemble_model.predict(features)
+                            logger.info(f"🎯 Predict result: type={type(pred_result)}, value={pred_result}")
+                            if isinstance(pred_result, np.ndarray):
+                                if pred_result.size > 0:
+                                    # For classification, convert class to probability-like value
+                                    if pred_result.dtype in [np.int32, np.int64]:
+                                        # It's a class label, convert to probability
+                                        # 0 = bearish (0.0), 1 = bullish (1.0)
+                                        raw_prediction = float(pred_result[0])
+                                    else:
+                                        raw_prediction = float(pred_result[0])
+                                else:
+                                    raw_prediction = 0.5
+                            else:
+                                raw_prediction = float(pred_result) if pred_result is not None else 0.5
+                        except Exception as e:
+                            logger.debug(f"Predict failed: {e}")
+                            raw_prediction = 0.5
+                    
+                    if raw_prediction is None:
+                        logger.warning(f"No prediction from model for {symbol}, using neutral")
+                        raw_prediction = 0.5
                         
-                        if isinstance(raw_prediction, np.ndarray) and len(raw_prediction) > 0:
-                            signal_strength = float(raw_prediction[0])
-                            confidence = 0.7  # Default confidence
-                        else:
-                            signal_strength = float(raw_prediction)
-                            confidence = 0.7
-                    else:
-                        logger.warning(f"Model has no predict method for {symbol}")
-                        continue
+                    # Convert to float safely
+                    try:
+                        prediction = float(raw_prediction)
+                    except (TypeError, ValueError):
+                        logger.warning(f"Could not convert prediction to float: {raw_prediction}")
+                        prediction = 0.5
+                    
+                    logger.info(f"📈 Final prediction value: {prediction:.3f}")
+                    
+                    # For probability-based prediction (0-1 range)
+                    # > 0.5 means bullish, < 0.5 means bearish
+                    signal_strength = abs(prediction - 0.5) * 2  # Convert to strength (0-1)
+                    confidence = min(1.0, signal_strength + 0.2)  # Higher strength = higher confidence
+                    logger.info(f"💪 Signal strength: {signal_strength:.3f}, confidence: {confidence:.3f}")
                         
                 except Exception as e:
-                    logger.debug(f"Prediction failed for {symbol}: {e}")
+                    logger.info(f"Prediction failed for {symbol}: {e}")
+                    import traceback
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
                     continue
                 
                 # Create trading signal
                 signal = {
                     'symbol': symbol,
-                    'signal': 'buy' if signal_strength > 0 else 'sell',
-                    'strength': abs(signal_strength),
+                    'signal': 'buy' if prediction > 0.5 else 'sell',  # Use raw prediction for direction
+                    'strength': signal_strength,  # Already positive from calculation above
                     'confidence': confidence,
                     'timestamp': timestamp,
-                    'features': features.iloc[-1].to_dict(),
+                    'features': features.iloc[0].to_dict() if not features.empty else {},
                     'sentiment_data': sentiment_dict,
                     'technical_indicators': self._extract_technical_indicators(features)
                 }
                 
                 # Validate signal
+                logger.info(f"✅ Validating signal for {symbol} - Signal: {signal['signal']}, Strength: {signal['strength']:.3f}")
                 is_valid = await self._validate_signal_by_strategy(signal)
+                logger.info(f"🔍 Validation result for {symbol}: {is_valid}")
                 if is_valid:
                     self.pending_signals.append(signal)
-                    logger.debug(f"✅ BACKTEST SIGNAL: {signal['signal'].upper()} {symbol} (strength: {signal['strength']:.3f})")
+                    logger.info(f"✅ BACKTEST SIGNAL ADDED: {signal['signal'].upper()} {symbol} (strength: {signal['strength']:.3f})")
+                else:
+                    logger.info(f"❌ SIGNAL REJECTED: {signal['signal'].upper()} {symbol} (strength: {signal['strength']:.3f})")
                 
             except Exception as e:
-                logger.debug(f"Failed to generate backtest prediction for {symbol}: {e}")
+                logger.info(f"❌ Failed to generate backtest prediction for {symbol}: {e}")
+                import traceback
+                traceback.print_exc()
     
     async def _update_market_data(self) -> None:
         """Update market data for all tracked symbols"""
@@ -1310,23 +1405,68 @@ class QuantumSentimentBot:
     async def _validate_signal(self, signal: Dict[str, Any]) -> bool:
         """Validate trading signal against risk rules"""
         
-        # Check position limits
-        current_positions = len([p for p in self.position_tracker.get_all_positions() if not p.is_flat])
-        if current_positions >= self.config.trading.max_positions:
-            return False
+        # Check position limits for new positions (buy signals)
+        if signal['signal'] == 'buy':
+            current_positions = len([p for p in self.position_tracker.get_all_positions() if not p.is_flat])
+            if current_positions >= self.config.trading.max_positions:
+                return False
+            
+            # Check concentration limits - don't buy if we already have a position
+            if signal['symbol'] in [p.symbol for p in self.position_tracker.get_all_positions() if not p.is_flat]:
+                return False  # Already have position, don't add more
         
-        # Check concentration limits
-        if signal['symbol'] in [p.symbol for p in self.position_tracker.get_all_positions()]:
-            return False  # Already have position
+        elif signal['signal'] == 'sell':
+            # For sell signals, we must have a position to sell
+            current_position = None
+            for p in self.position_tracker.get_all_positions():
+                if p.symbol == signal['symbol'] and not p.is_flat:
+                    current_position = p
+                    break
+            
+            if not current_position:
+                logger.debug("Cannot sell - no position in symbol", symbol=signal['symbol'])
+                return False  # No position to sell
+            
+            # Check if we have enough shares to sell
+            position_size = await self._calculate_position_size(signal)
+            if abs(current_position.quantity) < position_size:
+                logger.debug("Cannot sell - insufficient shares", 
+                           symbol=signal['symbol'],
+                           available=abs(current_position.quantity),
+                           requested=position_size)
+                return False  # Not enough shares
         
         return True
     
     async def _should_execute_signal(self, signal: Dict[str, Any]) -> bool:
         """Determine if signal should be executed"""
         
-        # Check signal age
-        signal_age = datetime.now() - signal['timestamp']
-        if signal_age > timedelta(minutes=10):
+        # In backtest mode, use simulation time instead of current system time
+        if self.mode == 'backtest' and hasattr(self.broker, 'current_time') and self.broker.current_time:
+            current_time = self.broker.current_time
+        else:
+            # Live/paper trading: use actual current time
+            current_time = datetime.now()
+        
+        signal_timestamp = signal['timestamp']
+        
+        # Handle timezone compatibility
+        if hasattr(signal_timestamp, 'tz') and signal_timestamp.tz is not None:
+            # Signal timestamp is timezone-aware
+            if current_time.tzinfo is None:
+                # Make current_time timezone-aware (UTC)
+                import pytz
+                current_time = pytz.utc.localize(current_time)
+        elif current_time.tzinfo is not None:
+            # Current time is timezone-aware but signal is naive
+            current_time = current_time.replace(tzinfo=None)
+        
+        signal_age = current_time - signal_timestamp
+        
+        # More lenient age check for backtesting (signals generated at exact simulation time should pass)
+        max_signal_age = timedelta(hours=1) if self.mode == 'backtest' else timedelta(minutes=10)
+        if signal_age > max_signal_age:
+            logger.debug("Signal too old", signal_age=signal_age, max_age=max_signal_age, mode=self.mode)
             return False  # Too old
         
         # Check market conditions
@@ -1454,28 +1594,189 @@ class QuantumSentimentBot:
             return 0
     
     async def _check_risk_limits(self) -> bool:
-        """Comprehensive risk limits check using full RiskEngine capabilities"""
+        """PRODUCTION-GRADE comprehensive risk limits check"""
         
         try:
-            # Get current positions for risk assessment
-            positions = self.position_tracker.get_all_positions()
+            # Different risk checks for different modes
+            if self.mode == TradingMode.BACKTEST:
+                return await self._check_backtest_risk_limits()
+            else:
+                return await self._check_live_risk_limits()
+                
+        except Exception as e:
+            logger.error("CRITICAL: Risk system failure", error=str(e))
+            # PRODUCTION RULE: Risk system failure = HALT ALL TRADING
+            raise RuntimeError(f"Risk system failure - trading halted: {e}")
+    
+    async def _check_backtest_risk_limits(self) -> bool:
+        """Production-grade risk checks for backtesting mode"""
+        
+        if not self.broker or not hasattr(self.broker, 'equity'):
+            raise RuntimeError("Simulated broker not properly initialized")
+        
+        # Get current portfolio state
+        initial_capital = getattr(self.broker, 'initial_capital', 10000)
+        current_equity = self.broker.equity
+        positions = getattr(self.broker, 'positions', {})
+        
+        # 1. DRAWDOWN CHECK - CRITICAL
+        drawdown = (initial_capital - current_equity) / initial_capital
+        if drawdown > self.config.risk.max_drawdown:
+            logger.warning("RISK BREACH: Maximum drawdown exceeded",
+                         drawdown=f"{drawdown:.2%}",
+                         limit=f"{self.config.risk.max_drawdown:.2%}",
+                         equity=current_equity,
+                         initial=initial_capital)
+            return False
+        
+        # 2. DAILY LOSS LIMIT - CRITICAL
+        daily_start_equity = getattr(self.broker, '_daily_start_equity', initial_capital)
+        daily_pnl = (current_equity - daily_start_equity) / daily_start_equity
+        if daily_pnl < -self.config.risk.daily_loss_limit:
+            logger.warning("RISK BREACH: Daily loss limit exceeded",
+                         daily_pnl=f"{daily_pnl:.2%}",
+                         limit=f"{self.config.risk.daily_loss_limit:.2%}")
+            return False
+        
+        # 3. POSITION COUNT LIMIT
+        active_positions = len([p for p in positions.values() if abs(p.qty) > 0])
+        if active_positions >= self.config.trading.max_positions:
+            logger.info("Position limit reached",
+                       current=active_positions,
+                       max=self.config.trading.max_positions)
+            return False
+        
+        # 4. POSITION SIZE LIMITS
+        for symbol, position in positions.items():
+            if abs(position.qty) > 0:
+                position_value = abs(position.qty * position.current_price)
+                position_weight = position_value / current_equity if current_equity > 0 else 0
+                
+                if position_weight > self.config.trading.max_position_size:
+                    logger.warning("RISK BREACH: Position size limit exceeded",
+                                 symbol=symbol,
+                                 weight=f"{position_weight:.2%}",
+                                 limit=f"{self.config.trading.max_position_size:.2%}")
+                    return False
+        
+        # 5. LEVERAGE CHECK
+        total_exposure = sum(abs(p.qty * p.current_price) for p in positions.values() if abs(p.qty) > 0)
+        leverage = total_exposure / current_equity if current_equity > 0 else 0
+        
+        if leverage > self.config.risk.max_leverage:
+            logger.warning("RISK BREACH: Leverage limit exceeded",
+                         leverage=f"{leverage:.2f}x",
+                         limit=f"{self.config.risk.max_leverage:.2f}x")
+            return False
+        
+        return True
+    
+    async def _check_live_risk_limits(self) -> bool:
+        """Production-grade risk checks for live trading mode"""
+        
+        if not self.broker:
+            raise RuntimeError("Broker not initialized for live risk checks")
+        
+        try:
+            # Get live account and position data
             account = await self.broker.get_account()
+            positions = self.broker.get_all_positions()
+            
             equity = float(account.equity)
+            buying_power = float(account.buying_power)
             
-            # Convert positions to weights for risk engine
-            position_weights = {}
-            for pos in positions:
-                if not pos.is_flat:
-                    position_value = pos.quantity * pos.current_price
-                    weight = position_value / equity if equity > 0 else 0
-                    position_weights[pos.symbol] = weight
+            # 1. ACCOUNT STATUS CHECK
+            if account.status != 'ACTIVE':
+                logger.error("RISK BREACH: Account not active", status=account.status)
+                return False
             
-            if not position_weights:
-                logger.info("No positions to assess risk for")
-                return True  # No positions = no risk
+            # 2. EQUITY REQUIREMENTS
+            min_equity = getattr(self.config.risk, 'min_equity_threshold', 1000)
+            if equity < min_equity:
+                logger.error("RISK BREACH: Insufficient equity", equity=equity, minimum=min_equity)
+                return False
             
-            # Get historical returns data for risk assessment
-            symbols = list(position_weights.keys())
+            # 3. BUYING POWER CHECK
+            if buying_power <= 0:
+                logger.warning("RISK WARNING: No buying power available", buying_power=buying_power)
+                return False
+            
+            # 4. POSITION LIMITS
+            if len(positions) >= self.config.trading.max_positions:
+                logger.info("Position limit reached", current=len(positions), max=self.config.trading.max_positions)
+                return False
+            
+            # 5. DRAWDOWN CHECK using historical high
+            if not hasattr(self, '_equity_high'):
+                self._equity_high = equity
+            
+            if equity > self._equity_high:
+                self._equity_high = equity
+            
+            drawdown = (self._equity_high - equity) / self._equity_high if self._equity_high > 0 else 0
+            if drawdown > self.config.risk.max_drawdown:
+                logger.warning("RISK BREACH: Maximum drawdown exceeded",
+                             drawdown=f"{drawdown:.2%}",
+                             limit=f"{self.config.risk.max_drawdown:.2%}")
+                return False
+            
+            # 6. DAILY LOSS CHECK
+            day_change = getattr(account, 'day_change', 0)
+            daily_loss_pct = float(day_change) / equity if equity > 0 else 0
+            
+            if daily_loss_pct < -self.config.risk.daily_loss_limit:
+                logger.warning("RISK BREACH: Daily loss limit exceeded",
+                             daily_loss=f"{daily_loss_pct:.2%}",
+                             limit=f"{self.config.risk.daily_loss_limit:.2%}")
+                return False
+            
+            # 7. POSITION SIZE CHECKS
+            for position in positions:
+                if not position.is_flat:
+                    position_value = abs(position.quantity * position.current_price)
+                    position_weight = position_value / equity if equity > 0 else 0
+                    
+                    if position_weight > self.config.trading.max_position_size:
+                        logger.warning("RISK BREACH: Position size exceeded",
+                                     symbol=position.symbol,
+                                     weight=f"{position_weight:.2%}",
+                                     limit=f"{self.config.trading.max_position_size:.2%}")
+                        return False
+            
+            # 8. VaR CALCULATION (if risk engine available and positions exist)
+            if self.risk_engine and len([p for p in positions if not p.is_flat]) > 0:
+                try:
+                    symbols = [pos.symbol for pos in positions if not pos.is_flat]
+                    returns_data = await self._get_returns_data_for_var(symbols)
+                    if returns_data is not None:
+                        weights = self._calculate_position_weights(positions, equity)
+                        portfolio_var = self.risk_engine.calculate_portfolio_var(
+                            returns_data=returns_data,
+                            weights=weights,
+                            confidence_level=0.05,  # 95% VaR
+                            time_horizon=1
+                        )
+                        
+                        var_limit = equity * 0.05  # 5% VaR limit
+                        if portfolio_var > var_limit:
+                            logger.warning("RISK BREACH: Portfolio VaR exceeded",
+                                         var=portfolio_var,
+                                         limit=var_limit)
+                            return False
+                
+                except Exception as var_error:
+                    logger.warning("VaR calculation failed", error=str(var_error))
+                    # Continue without VaR check if it fails
+            
+            return True
+            
+        except Exception as e:
+            logger.error("Live risk check failed", error=str(e))
+            raise RuntimeError(f"Live risk system failure: {e}")
+    
+    async def _get_returns_data_for_var(self, symbols: List[str]) -> Optional[pd.DataFrame]:
+        """Get historical returns data for VaR calculation"""
+        try:
             returns_data_list = []
             
             for symbol in symbols:
@@ -1483,72 +1784,41 @@ class QuantumSentimentBot:
                     bars = await self.broker.get_bars(
                         symbol,
                         timeframe="1Day",
-                        limit=252  # 1 year of data for VaR
+                        limit=252  # 1 year of data
                     )
                     
                     if not bars.empty:
                         returns = bars[['close']].pct_change().dropna()
                         returns.columns = [symbol]
                         returns_data_list.append(returns)
+                        
                 except Exception as e:
-                    logger.warning(f"Could not fetch returns data for {symbol}: {e}")
+                    logger.warning(f"Could not fetch returns for {symbol}: {e}")
             
-            if not returns_data_list:
-                logger.warning("No returns data available for risk assessment, using basic checks")
-                return await self._basic_risk_check()
+            if returns_data_list:
+                import pandas as pd
+                returns_data = pd.concat(returns_data_list, axis=1)
+                return returns_data.fillna(0)
             
-            # Combine returns data
-            returns_df = pd.concat(returns_data_list, axis=1).fillna(0)
-            
-            # Perform comprehensive risk assessment
-            risk_assessment = self.risk_engine.assess_portfolio_risk(
-                positions=position_weights,
-                returns=returns_df
-            )
-            
-            # Log risk assessment summary
-            risk_score = risk_assessment.get('overall_risk_score', 0)
-            alerts = risk_assessment.get('risk_alerts', [])
-            
-            logger.info(f"Portfolio risk assessment completed",
-                       risk_score=risk_score,
-                       alerts_count=len(alerts),
-                       critical_alerts=len([a for a in alerts if a['severity'] == 'CRITICAL']))
-            
-            # Check for critical risk limit breaches
-            critical_alerts = [a for a in alerts if a['severity'] == 'CRITICAL']
-            if critical_alerts:
-                logger.error("CRITICAL RISK ALERTS DETECTED - Trading halted",
-                           alerts=[a['message'] for a in critical_alerts])
-                return False
-            
-            # Check overall risk score threshold
-            if risk_score > 85:  # High risk threshold
-                logger.warning("High portfolio risk score detected", risk_score=risk_score)
-                return False
-            
-            # Check specific limit utilization
-            limit_util = risk_assessment.get('limit_utilization', {})
-            
-            # Fail if any limit is significantly breached
-            for limit_name, limit_data in limit_util.items():
-                if limit_data.get('breach', False):
-                    logger.error(f"Risk limit breached: {limit_name}", 
-                               current=limit_data.get('current'),
-                               limit=limit_data.get('limit'))
-                    return False
-                
-                # Warning for high utilization
-                if limit_data.get('utilization', 0) > 0.9:
-                    logger.warning(f"Risk limit high utilization: {limit_name}",
-                                 utilization=f"{limit_data['utilization']:.1%}")
-            
-            logger.info("✅ All risk limits within acceptable ranges")
-            return True
+            return None
             
         except Exception as e:
-            logger.error(f"Error in comprehensive risk check: {e}, falling back to basic check")
-            return await self._basic_risk_check()
+            logger.error("Error getting returns data for VaR", error=str(e))
+            return None
+    
+    def _calculate_position_weights(self, positions: List, equity: float) -> np.ndarray:
+        """Calculate position weights for VaR calculation"""
+        weights = []
+        
+        for position in positions:
+            if not position.is_flat:
+                position_value = position.quantity * position.current_price
+                weight = position_value / equity if equity > 0 else 0
+                weights.append(weight)
+            else:
+                weights.append(0.0)
+        
+        return np.array(weights)
     
     async def _basic_risk_check(self) -> bool:
         """Fallback basic risk checking when comprehensive assessment fails
@@ -1742,7 +2012,7 @@ class QuantumSentimentBot:
             
             if has_technical and has_sentiment and config.get('confidence_boost_both', 0) > 0:
                 original_confidence = signal['confidence']
-                boosted_confidence = min(1.0, original_confidence + config['confidence_boost_both'])
+                boosted_confidence = min(1.0, original_confidence + config.get('confidence_boost_both', 0))
                 signal['confidence'] = boosted_confidence
                 
                 logger.debug("Confidence boosted for multi-signal agreement",

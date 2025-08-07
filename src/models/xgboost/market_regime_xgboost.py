@@ -108,6 +108,22 @@ class MarketRegimeXGBoost(ClassificationModel):
         self.feature_names = []
         self.feature_importance = {}
         
+        # Ensure config has necessary attributes
+        if not hasattr(self.config, 'lookback_periods'):
+            self.config.lookback_periods = [5, 10, 20, 50, 100, 200]
+        if not hasattr(self.config, 'technical_indicators'):
+            self.config.technical_indicators = [
+                'sma', 'ema', 'rsi', 'macd', 'bollinger_bands',
+                'atr', 'adx', 'obv', 'vwap', 'pivot_points',
+                'fibonacci_retracements', 'ichimoku', 'stochastic'
+            ]
+        if not hasattr(self.config, 'market_structure_features'):
+            self.config.market_structure_features = [
+                'spread', 'depth_imbalance', 'trade_flow_toxicity',
+                'kyle_lambda', 'roll_measure', 'amihud_illiquidity',
+                'microstructure_noise', 'pin_score', 'vpin'
+            ]
+        
     def build_model(self) -> xgb.XGBClassifier:
         """Build the XGBoost model"""
         self.model = xgb.XGBClassifier(

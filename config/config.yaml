@@ -11,26 +11,49 @@ system:
 
 # === TRADING CONFIGURATION ===
 trading:
-  # Universe of stocks to trade
+  # Optimal 30-symbol watchlist for Alpaca free tier (30 symbol limit)
   watchlist:
-    - AAPL
-    - GOOGL  
-    - MSFT
-    - TSLA
-    - NVDA
-    - SPY
-    - QQQ
-    - META
-    - AMZN
+    # TOP PRIORITY CORE (13 symbols) - Essential mega caps + market ETFs + volatility
+    - AAPL    # Apple - highest volume
+    - TSLA    # Tesla - highest volatility 
+    - NVDA    # NVIDIA - AI/tech leader
+    - MSFT    # Microsoft - stable mega cap
+    - GOOGL   # Google - tech giant
+    - AMZN    # Amazon - e-commerce leader
+    - META    # Meta - social/VR
+    - SPY     # S&P 500 ETF - market benchmark
+    - QQQ     # Nasdaq ETF - tech exposure
+    - IWM     # Russell 2000 - small caps
+    - VXX     # Volatility ETF - hedging
+    - UVXY    # 2x VIX - extreme volatility
+    - SQQQ    # 3x inverse QQQ - bear hedge
+    - TQQQ    # 3x QQQ - bull leverage
+    # HIGH PRIORITY GROWTH (8 symbols) - Growth tech with sentiment following
+    - AMD     # Advanced Micro Devices
+    - NFLX    # Netflix - streaming leader
+    - CRM     # Salesforce - enterprise SaaS
+    - ADBE    # Adobe - creative software
+    - PLTR    # Palantir - data analytics (meme potential)
+    - SNOW    # Snowflake - cloud data
+    - COIN    # Coinbase - crypto exposure
+    - HOOD    # Robinhood - fintech/meme
+    # MEME/SENTIMENT DRIVEN (9 symbols) - High alpha potential from social sentiment
+    - GME     # GameStop - king of meme stocks
+    - AMC     # AMC Entertainment - movie meme
+    - SOFI    # SoFi - fintech meme
+    - RIVN    # Rivian - EV startup
+    - LCID    # Lucid - luxury EV
+    - NIO     # NIO - Chinese EV
+    - BBBY    # Bed Bath Beyond - retail meme
   
-  # Position limits
-  max_positions: 10
-  max_position_size: 0.10  # 10% max per position
-  min_position_size: 0.001  # 0.1% min per position
+  # Position limits - AGGRESSIVE SIZING
+  max_positions: 25  # More concurrent positions
+  max_position_size: 0.20  # 20% max per position - AGGRESSIVE
+  min_position_size: 0.005  # 0.5% min per position - BIGGER MINIMUM
   
-  # Signal thresholds
-  signal_threshold: 0.7
-  confidence_threshold: 0.6
+  # Signal thresholds - MORE AGGRESSIVE
+  signal_threshold: 0.5  # Lower threshold for more trades
+  confidence_threshold: 0.4  # Lower confidence required
   
   # Trading strategy mode
   strategy_mode: "adaptive"  # adaptive, technical_only, sentiment_only, conservative
@@ -187,7 +210,7 @@ ml:
 # === FEATURE ENGINEERING ===
 features:
   technical:
-    timeframes: ["1h", "4h", "1d"]
+    timeframes: ["5m", "15m", "1h", "4h", "1d"]  # MASSIVE - ALL TIMEFRAMES
     indicators:
       - "sma_20"
       - "ema_12"
@@ -207,21 +230,21 @@ features:
     metrics: ["pe_ratio", "market_cap", "volume", "beta"]
     update_frequency: "daily"
 
-# === RISK MANAGEMENT ===
+# === RISK MANAGEMENT - AGGRESSIVE SETTINGS ===
 risk:
-  # Portfolio level limits
-  max_drawdown: 0.10        # 10% maximum drawdown
-  daily_loss_limit: 0.03   # 3% daily loss limit
-  max_leverage: 1.0         # No leverage
+  # Portfolio level limits - HIGH RISK HIGH REWARD
+  max_drawdown: 0.25        # 25% maximum drawdown - AGGRESSIVE
+  daily_loss_limit: 0.08   # 8% daily loss limit - AGGRESSIVE
+  max_leverage: 2.0         # 2x leverage allowed - AGGRESSIVE
   
-  # Position level limits
-  stop_loss_pct: 0.02       # 2% stop loss
-  take_profit_pct: 0.05     # 5% take profit
-  risk_per_trade: 0.01      # 1% risk per trade
+  # Position level limits - WIDER STOPS
+  stop_loss_pct: 0.05       # 5% stop loss - WIDER
+  take_profit_pct: 0.15     # 15% take profit - BIGGER TARGETS
+  risk_per_trade: 0.03      # 3% risk per trade - AGGRESSIVE
   
-  # Correlation limits
-  max_correlation: 0.7
-  max_sector_concentration: 0.3
+  # Correlation limits - ALLOW MORE CONCENTRATION
+  max_correlation: 0.85     # Higher correlation allowed
+  max_sector_concentration: 0.6  # 60% sector concentration allowed
 
 # === PORTFOLIO OPTIMIZATION ===
 portfolio:
@@ -236,9 +259,9 @@ portfolio:
 
 # === SYMBOLS & UNIVERSE ===
 universe:
-  stocks: ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "SPY", "QQQ"]
-  crypto: ["BTC-USD", "ETH-USD", "BNB-USD", "ADA-USD", "SOL-USD"]
-  forex: ["EUR/USD", "GBP/USD", "USD/JPY"]
+  stocks: ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "SPY", "QQQ", "GME", "AMC", "PLTR", "SOFI", "RIVN", "LCID", "NIO", "MSTR", "RIOT", "MARA", "ARKK", "TQQQ", "SQQQ", "UVXY", "VXX", "GLD", "SLV", "TLT", "HYG"]
+  crypto: ["BTC-USD", "ETH-USD", "BNB-USD", "ADA-USD", "SOL-USD", "AVAX-USD", "MATIC-USD", "DOT-USD", "ATOM-USD", "LINK-USD", "UNI-USD", "AAVE-USD"]
+  forex: ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "NZD/USD", "USD/CAD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
   
   filters:
     min_market_cap: 1e9    # $1B minimum

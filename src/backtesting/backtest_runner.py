@@ -12,9 +12,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import structlog
+import pytz
+import os
 
 from ..configuration import load_config, Config
-from ..data.fetcher import DataFetcher
+from ..data.data_fetcher import DataFetcher
 from ..main import QuantumSentimentBot
 from .simulated_broker import SimulatedBroker
 from .performance_report import PerformanceAnalyzer
@@ -33,7 +35,12 @@ class BacktestRunner:
             config_path: Path to configuration file
         """
         self.config = load_config(config_path)
-        self.data_fetcher = DataFetcher(self.config)
+        
+        # Initialize database manager for data fetcher
+        from ..database import DatabaseManager
+        self.db_manager = DatabaseManager()
+        self.data_fetcher = DataFetcher(self.config, self.db_manager)
+        
         self.historical_data = None
         self.simulated_broker = None
         self.bot = None
@@ -66,15 +73,15 @@ class BacktestRunner:
             initial_capital=initial_capital
         )
         
-        # 1. Load historical data
-        await self._load_historical_data(symbols, start_date, end_date)
-        
-        # 2. Initialize simulated broker
+        # 1. Initialize simulated broker first
         self.simulated_broker = SimulatedBroker(
             initial_capital=initial_capital,
             commission_per_share=0.005,  # $0.005 per share
             slippage_bps=5  # 5 basis points slippage
         )
+        
+        # 2. Load historical data and set it in the broker
+        await self._load_historical_data(symbols, start_date, end_date)
         
         # 3. Initialize bot with simulated broker
         self.bot = QuantumSentimentBot(
@@ -95,7 +102,25 @@ class BacktestRunner:
             initial_capital=initial_capital
         )
         
-        results = self.performance_analyzer.generate_report()
+        report = self.performance_analyzer.generate_report()
+        
+        # Extract metrics for easy access
+        metrics = report.get('metrics', {})
+        results = {
+            'total_return': metrics.get('total_return', 0.0),
+            'annualized_return': metrics.get('annualized_return', 0.0),
+            'volatility': metrics.get('volatility', 0.0),
+            'sharpe_ratio': metrics.get('sharpe_ratio', 0.0),
+            'sortino_ratio': metrics.get('sortino_ratio', 0.0),
+            'max_drawdown': metrics.get('max_drawdown', 0.0),
+            'calmar_ratio': metrics.get('calmar_ratio', 0.0),
+            'win_rate': metrics.get('win_rate', 0.0),
+            'profit_factor': metrics.get('profit_factor', 0.0),
+            'total_trades': metrics.get('total_trades', 0),
+            'winning_trades': metrics.get('winning_trades', 0),
+            'losing_trades': metrics.get('losing_trades', 0),
+            'full_report': report  # Include full report for detailed analysis
+        }
         
         logger.info(
             "Backtest completed",
@@ -115,21 +140,92 @@ class BacktestRunner:
         """Load historical market data for the backtest period"""
         logger.info("Loading historical data", symbols=symbols)
         
-        # Convert string dates to datetime
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        # We need extra historical data before the start date for indicators
+        # Add 30 days of buffer data for technical indicators
+        start_dt = pd.to_datetime(start_date) - timedelta(days=30)
+        end_dt = pd.to_datetime(end_date) + timedelta(days=1)  # Include end date
         
-        # Load data for all symbols
+        # Store the actual simulation start date
+        self.simulation_start_date = pd.to_datetime(start_date)
+        
+        # Load data from existing historical files
         all_data = {}
         for symbol in symbols:
             try:
-                data = await self.data_fetcher.fetch_bars(
-                    symbol=symbol,
-                    timeframe='1Hour',
-                    start=start_dt,
-                    end=end_dt,
-                    limit=None
-                )
+                # Try different file patterns - match our production data format
+                import glob
+                pattern_paths = [
+                    f"data/historical/{symbol}/{symbol}_Hour_*.csv",     # Production format
+                    f"data/historical/{symbol}/{symbol}_15Min_*.csv",   # Production format
+                    f"data/historical/{symbol}/{symbol}_Day_*.csv",     # Production format
+                    f"data/historical/{symbol}/{symbol}_1Hour_*.csv",   # Legacy format
+                    f"data/historical/{symbol}/{symbol}_1Day_*.csv"     # Legacy format
+                ]
+                
+                data = None
+                for pattern in pattern_paths:
+                    files = glob.glob(pattern)
+                    if files:
+                        # Try each file to find one that covers our date range
+                        file_path = None
+                        for candidate_file in files:
+                            # Quick check if this file might contain our date range
+                            try:
+                                # Check first and last lines to get date range
+                                with open(candidate_file, 'r') as f:
+                                    lines = f.readlines()
+                                    if len(lines) > 2:  # Header + at least 2 data lines
+                                        first_date_str = lines[1].split(',')[0]
+                                        last_date_str = lines[-1].split(',')[0]
+                                        first_date = pd.to_datetime(first_date_str, utc=True)
+                                        last_date = pd.to_datetime(last_date_str, utc=True)
+                                        
+                                        # Check if our requested range overlaps with file range
+                                        start_dt_utc = start_dt.tz_localize('UTC') if start_dt.tz is None else start_dt.tz_convert('UTC')
+                                        end_dt_utc = end_dt.tz_localize('UTC') if end_dt.tz is None else end_dt.tz_convert('UTC')
+                                        
+                                        if (start_dt_utc <= last_date and end_dt_utc >= first_date):
+                                            file_path = candidate_file
+                                            logger.info(f"Selected file {file_path} covering {first_date} to {last_date}")
+                                            break
+                            except Exception:
+                                continue
+                        
+                        if not file_path:
+                            # Fallback to the largest file (most comprehensive)
+                            file_path = max(files, key=lambda f: os.path.getsize(f))
+                            logger.info(f"Using largest file as fallback: {file_path}")
+                        logger.info(f"Loading data from {file_path}")
+                        
+                        try:
+                            data = pd.read_csv(file_path)
+                            # Parse timestamp as timezone-aware (UTC), then let pandas handle comparisons
+                            data['timestamp'] = pd.to_datetime(data['timestamp'], utc=True)
+                            data.set_index('timestamp', inplace=True)
+                            
+                            # Filter data to requested range - convert filter dates to UTC for comparison
+                            logger.info(f"Data shape before filter: {data.shape}")
+                            logger.info(f"Date range: {data.index.min()} to {data.index.max()}")
+                            logger.info(f"Filter range: {start_dt} to {end_dt}")
+                            
+                            # Make filter dates timezone-aware (UTC) to match data
+                            start_dt_utc = start_dt.tz_localize('UTC') if start_dt.tz is None else start_dt.tz_convert('UTC')
+                            end_dt_utc = end_dt.tz_localize('UTC') if end_dt.tz is None else end_dt.tz_convert('UTC')
+                            
+                            # Filter data to requested range
+                            data = data[(data.index >= start_dt_utc) & (data.index <= end_dt_utc)]
+                            logger.info(f"Data shape after filter: {data.shape}")
+                            if not data.empty:
+                                logger.info(f"Successfully loaded data for {symbol}: {len(data)} bars from {data.index.min()} to {data.index.max()}")
+                                break
+                            else:
+                                logger.warning(f"Data filtered to empty for {symbol} in range {start_dt_utc} to {end_dt_utc}")
+                                data = None  # Reset to None so we try next pattern
+                                
+                        except Exception as e:
+                            logger.error(f"Error loading data from {file_path}: {e}")
+                            data = None
+                            continue
                 
                 if data is not None and not data.empty:
                     all_data[symbol] = data
@@ -156,13 +252,19 @@ class BacktestRunner:
         
         # Get all unique timestamps across all symbols
         all_timestamps = set()
-        for symbol_data in self.historical_data.values():
+        for symbol, symbol_data in self.historical_data.items():
+            logger.info(f"Symbol {symbol} has {len(symbol_data)} data points from {symbol_data.index.min()} to {symbol_data.index.max()}")
             all_timestamps.update(symbol_data.index)
         
         # Sort timestamps chronologically
         sorted_timestamps = sorted(all_timestamps)
         
-        logger.info(f"Simulating {len(sorted_timestamps)} time periods")
+        # Filter to only simulate from the actual start date (not the buffer period)
+        if hasattr(self, 'simulation_start_date'):
+            simulation_start_utc = self.simulation_start_date.tz_localize('UTC') if self.simulation_start_date.tz is None else self.simulation_start_date.tz_convert('UTC')
+            sorted_timestamps = [ts for ts in sorted_timestamps if ts >= simulation_start_utc]
+        
+        logger.info(f"Simulating {len(sorted_timestamps)} time periods from {sorted_timestamps[0] if sorted_timestamps else 'N/A'} to {sorted_timestamps[-1] if sorted_timestamps else 'N/A'}")
         
         # Run simulation bar-by-bar
         for i, timestamp in enumerate(sorted_timestamps):

@@ -76,7 +76,7 @@ class TechnicalFeatures:
         Returns:
             Dictionary of technical features
         """
-        if df.empty or len(df) < 50:
+        if df.empty or len(df) < 20:
             logger.warning("Insufficient data for technical features", records=len(df))
             return {}
         

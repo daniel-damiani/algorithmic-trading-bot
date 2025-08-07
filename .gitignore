@@ -161,4 +161,5 @@ archive/
 models/
 data/
 backups/
+archived_scripts/
 test_models/
