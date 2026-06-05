@@ -19,7 +19,15 @@ from .base import (
 
 # Import specific models
 from .lstm import PriceLSTM, PriceLSTMConfig
-from .cnn import ChartPatternCNN, ChartPatternConfig
+
+try:
+    from .cnn import ChartPatternCNN, ChartPatternConfig
+    _has_cnn = True
+except ImportError:
+    ChartPatternCNN = None
+    ChartPatternConfig = None
+    _has_cnn = False
+
 from .xgboost import MarketRegimeXGBoost, MarketRegimeConfig
 from .ensemble import StackedEnsemble, StackedEnsembleConfig
 

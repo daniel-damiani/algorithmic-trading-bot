@@ -20,12 +20,15 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Note: pandas_ta has numpy compatibility issues, using TA-Lib primarily
+# Optional: pandas-ta-classic replaces the removed pandas-ta PyPI package
 try:
     import pandas_ta as ta
 except ImportError:
-    logger.warning("pandas_ta not available, using TA-Lib only")
-    ta = None
+    try:
+        import pandas_ta_classic as ta
+    except ImportError:
+        logger.warning("pandas_ta not available, using TA-Lib only")
+        ta = None
 
 
 class TechnicalFeatures:

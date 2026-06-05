@@ -556,6 +556,13 @@ class OrderManager:
     def get_order(self, order_id: str) -> Optional[Order]:
         """Get order by ID"""
         return self.orders.get(order_id)
+
+    def find_order_by_alpaca_id(self, alpaca_order_id: str) -> Optional[Order]:
+        """Find a managed order by Alpaca order id stored in tags."""
+        for order in self.orders.values():
+            if order.tags.get("alpaca_order_id") == alpaca_order_id:
+                return order
+        return None
     
     def get_orders_by_symbol(self, symbol: str) -> List[Order]:
         """Get all orders for a symbol"""

@@ -141,6 +141,26 @@ class AlpacaBroker:
         except Exception as e:
             logger.error("Failed to get portfolio value", error=str(e))
             return 0.0
+
+    async def get_portfolio_history(
+        self,
+        period: str = "3M",
+        timeframe: str = "1D",
+    ) -> Dict[str, Any]:
+        """Get Alpaca portfolio equity / P&L history."""
+        try:
+            return self.client.get_portfolio_history(
+                period=period,
+                timeframe=timeframe,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to get portfolio history",
+                period=period,
+                timeframe=timeframe,
+                error=str(e),
+            )
+            return {}
     
     # === POSITION METHODS ===
     
@@ -404,8 +424,8 @@ class AlpacaBroker:
             return
         
         try:
-            # Get all orders from Alpaca
-            alpaca_orders = await self.get_orders(status="all", limit=500)
+            # Only sync open orders — importing full history duplicates entries
+            alpaca_orders = await self.get_orders(status="open", limit=100)
             
             for alpaca_order in alpaca_orders:
                 await self._sync_order_with_manager(alpaca_order)
@@ -460,8 +480,8 @@ class AlpacaBroker:
             return
         
         try:
-            # Check if order already exists in manager
-            existing_order = self.order_manager.get_order(alpaca_order.id)
+            # Check if order already exists in manager (by Alpaca id, not internal uuid)
+            existing_order = self.order_manager.find_order_by_alpaca_id(alpaca_order.id)
             
             if not existing_order:
                 # Create new order in manager
@@ -477,11 +497,9 @@ class AlpacaBroker:
                     limit_price=float(alpaca_order.limit_price) if alpaca_order.limit_price else None,
                     stop_price=float(alpaca_order.stop_price) if alpaca_order.stop_price else None,
                     time_in_force=time_in_force,
-                    client_order_id=alpaca_order.client_order_id
+                    client_order_id=alpaca_order.client_order_id,
+                    tags={"alpaca_order_id": alpaca_order.id},
                 )
-                
-                # Store Alpaca order ID reference
-                managed_order.tags['alpaca_order_id'] = alpaca_order.id
             else:
                 managed_order = existing_order
             

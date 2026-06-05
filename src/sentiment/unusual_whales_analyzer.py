@@ -67,13 +67,41 @@ class UnusualWhalesConfig:
     # Analysis parameters
     lookback_days: int = 30
     min_trade_value: float = 10000  # Minimum trade value to consider
-    
+    cache_ttl_seconds: int = 900  # Reuse congress trade scrape across symbols
+
     # Political parties
     parties: List[str] = None
     
     def __post_init__(self):
         if self.parties is None:
             self.parties = ['Republican', 'Democrat', 'Independent']
+
+
+def to_fusion_payload(results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map UnusualWhales analyze_symbol output to sentiment fusion format."""
+    trade_count = int(results.get("total_congress_trades", 0) or 0) + int(
+        results.get("total_insider_trades", 0) or 0
+    )
+    if trade_count <= 0:
+        return None
+
+    interest = float(results.get("congress_interest_level", 0) or 0)
+    insider_conf = float(results.get("insider_confidence", 0) or 0)
+    confidence = max(interest, insider_conf, min(trade_count / 5.0, 1.0) * 0.4)
+    confidence = min(max(confidence, 0.15), 1.0)
+
+    timestamp = results.get("timestamp")
+    if timestamp is not None and not isinstance(timestamp, datetime):
+        timestamp = datetime.utcnow()
+
+    return {
+        "sentiment_score": float(results.get("political_sentiment", 0) or 0),
+        "confidence": confidence,
+        "timestamp": timestamp or datetime.utcnow(),
+        "total_mentions": trade_count,
+        "source_diversity": 1.0 if trade_count >= 3 else 0.5,
+        "source": "unusual_whales",
+    }
 
 
 class UnusualWhalesAnalyzer:
@@ -91,7 +119,9 @@ class UnusualWhalesAnalyzer:
         self.playwright = None
         self.browser = None
         self.page = None
-        
+        self._cached_congress_trades: Optional[List[Dict[str, Any]]] = None
+        self._cache_at: Optional[datetime] = None
+
         # Political figures and their parties (simplified mapping)
         self.political_mapping = {
             # High-profile politicians (this would be expanded in production)
@@ -116,7 +146,11 @@ class UnusualWhalesAnalyzer:
         }
         
         logger.info("UnusualWhales analyzer initialized")
-    
+
+    @property
+    def scraper_ready(self) -> bool:
+        return self.page is not None or self.driver is not None
+
     def initialize(self) -> bool:
         """Initialize web scraping capabilities"""
         try:
@@ -295,30 +329,83 @@ class UnusualWhalesAnalyzer:
             logger.error("Political intelligence analysis failed", symbol=symbol, error=str(e))
             raise
     
+    def _cache_fresh(self) -> bool:
+        if self._cached_congress_trades is None or self._cache_at is None:
+            return False
+        age = (datetime.utcnow() - self._cache_at).total_seconds()
+        return age < self.config.cache_ttl_seconds
+
+    def _trade_matches_symbol(self, trade: Dict[str, Any], symbol_upper: str) -> bool:
+        trade_sym = str(trade.get("symbol", "") or "").upper()
+        if trade_sym == symbol_upper:
+            return True
+        orig = trade.get("raw_data", {}).get("original_data", {}) or {}
+        for field in (
+            orig.get("symbol"),
+            orig.get("asset_description"),
+            orig.get("notes"),
+        ):
+            if field and symbol_upper in str(field).upper():
+                return True
+        return False
+
+    def _filter_trades_for_symbol(
+        self, trades: List[Dict[str, Any]], symbol: str, cutoff_date: datetime
+    ) -> List[Dict[str, Any]]:
+        filtered: List[Dict[str, Any]] = []
+        symbol_upper = symbol.upper() if symbol else ""
+        for trade in trades:
+            trade_date = trade.get("trade_date")
+            if isinstance(trade_date, datetime) and trade_date < cutoff_date:
+                continue
+            if symbol_upper and not self._trade_matches_symbol(trade, symbol_upper):
+                continue
+            filtered.append(trade)
+        return filtered
+
     def _get_congressional_trades(self, symbol: str, cutoff_date: datetime) -> List[Dict[str, Any]]:
         """Scrape congressional trading data for the symbol using real UnusualWhales structure"""
-        trades = []
-        
+        trades: List[Dict[str, Any]] = []
+
         try:
-            # Try JSON API approach first (more reliable)
-            json_trades = self._get_trades_from_json_api(symbol, cutoff_date)
+            if self._cache_fresh():
+                trades = self._filter_trades_for_symbol(
+                    self._cached_congress_trades or [], symbol, cutoff_date
+                )
+                logger.debug(
+                    "Congressional trades from cache",
+                    symbol=symbol or "ALL",
+                    count=len(trades),
+                )
+                return trades
+
+            # Fetch all trades once, then cache (one scrape per TTL for all symbols)
+            json_trades = self._get_trades_from_json_api("", cutoff_date)
             if json_trades:
-                logger.info("Retrieved trades from JSON API", count=len(json_trades))
-                return json_trades
-            
+                self._cached_congress_trades = json_trades
+                self._cache_at = datetime.utcnow()
+                trades = self._filter_trades_for_symbol(json_trades, symbol, cutoff_date)
+                logger.info(
+                    "Retrieved trades from JSON API",
+                    total=len(json_trades),
+                    symbol=symbol or "ALL",
+                    matched=len(trades),
+                )
+                return trades
+
             # Fallback to DOM scraping
-            if self.page:  # Playwright scraping with real selectors
+            if self.page:
                 trades = self._scrape_trades_with_playwright(symbol, cutoff_date)
-            elif self.driver:  # Selenium fallback
+            elif self.driver:
                 trades = self._scrape_trades_with_selenium(symbol, cutoff_date)
-            
-            # Final fallback: Generate some realistic sample data for testing
-            if not trades and self.config.lookback_days <= 7:  # Only for testing
-                trades = self._generate_sample_congress_data(symbol, cutoff_date)
-            
+
+            if trades:
+                self._cached_congress_trades = trades
+                self._cache_at = datetime.utcnow()
+
             logger.debug("Congressional trades collected", count=len(trades))
             return trades
-            
+
         except Exception as e:
             logger.warning("Failed to get congressional trades", error=str(e))
             return []

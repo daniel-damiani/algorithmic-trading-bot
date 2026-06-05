@@ -21,6 +21,23 @@ from alpaca_trade_api.rest import TimeFrame, TimeFrameUnit
 logger = structlog.get_logger(__name__)
 
 
+def _parse_alpaca_timestamp(val: Any) -> pd.Timestamp:
+    """Parse Alpaca API timestamps without SDK entity warnings."""
+    if val is None:
+        return pd.Timestamp.now(tz="UTC")
+    if isinstance(val, pd.Timestamp):
+        return val.tz_convert("UTC") if val.tzinfo else val.tz_localize("UTC")
+    if isinstance(val, str):
+        return pd.to_datetime(val, utc=True)
+    if isinstance(val, (int, float)):
+        if val > 1e14:
+            return pd.to_datetime(val, unit="ns", utc=True)
+        if val > 1e11:
+            return pd.to_datetime(val, unit="ms", utc=True)
+        return pd.to_datetime(val, unit="s", utc=True)
+    return pd.to_datetime(val, utc=True)
+
+
 class AlpacaClient:
     """Alpaca API client with enhanced functionality for trading bot"""
     
@@ -115,13 +132,14 @@ class AlpacaClient:
         """Get latest quote for symbol"""
         try:
             quote = self.api.get_latest_quote(symbol)
+            raw = getattr(quote, "_raw", {})
             return {
                 'symbol': symbol,
-                'bid': float(quote.bid_price),
-                'ask': float(quote.ask_price),
-                'bid_size': quote.bid_size,
-                'ask_size': quote.ask_size,
-                'timestamp': quote.timestamp
+                'bid': float(raw.get('bp', raw.get('bidprice', 0))),
+                'ask': float(raw.get('ap', raw.get('askprice', 0))),
+                'bid_size': raw.get('bs', raw.get('bidsize', 0)),
+                'ask_size': raw.get('as', raw.get('asksize', 0)),
+                'timestamp': _parse_alpaca_timestamp(raw.get('t')),
             }
         except Exception as e:
             logger.error("Failed to get quote", symbol=symbol, error=str(e))
@@ -131,11 +149,12 @@ class AlpacaClient:
         """Get latest trade for symbol"""
         try:
             trade = self.api.get_latest_trade(symbol)
+            raw = getattr(trade, "_raw", {})
             return {
                 'symbol': symbol,
-                'price': float(trade.price),
-                'size': trade.size,
-                'timestamp': trade.timestamp
+                'price': float(raw.get('p', raw.get('price', 0))),
+                'size': raw.get('s', raw.get('size', 0)),
+                'timestamp': _parse_alpaca_timestamp(raw.get('t')),
             }
         except Exception as e:
             logger.error("Failed to get latest trade", symbol=symbol, error=str(e))
@@ -234,23 +253,35 @@ class AlpacaClient:
                 api_params['end'] = end_str
                 
             bars = self.api.get_bars(api_symbol, tf, **api_params)
-            
-            # Convert to DataFrame
-            data = []
-            for bar in bars:
-                data.append({
-                    'timestamp': bar.t,  # Alpaca uses 't' for timestamp
-                    'open': float(bar.o),   # Alpaca uses 'o' for open
-                    'high': float(bar.h),   # Alpaca uses 'h' for high
-                    'low': float(bar.l),    # Alpaca uses 'l' for low
-                    'close': float(bar.c),  # Alpaca uses 'c' for close
-                    'volume': bar.v  # Alpaca uses 'v' for volume
-                })
-            
-            df = pd.DataFrame(data)
-            if not df.empty:
-                df.set_index('timestamp', inplace=True)
-                df.sort_index(inplace=True)
+
+            if not bars:
+                return pd.DataFrame()
+
+            # Build DataFrame from raw bar rows — avoids Bar/Trade entity timestamp parsing
+            raw_rows = getattr(bars, "_raw", None)
+            if raw_rows:
+                df = pd.DataFrame(raw_rows)
+                rename = {
+                    "t": "timestamp",
+                    "o": "open",
+                    "h": "high",
+                    "l": "low",
+                    "c": "close",
+                    "v": "volume",
+                }
+                df.rename(columns={k: v for k, v in rename.items() if k in df.columns}, inplace=True)
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+                    df.set_index("timestamp", inplace=True)
+            else:
+                df = bars.df.copy()
+            if df.empty:
+                return df
+
+            keep = [c for c in ('open', 'high', 'low', 'close', 'volume') if c in df.columns]
+            df = df[keep]
+            df.index.name = 'timestamp'
+            df.sort_index(inplace=True)
             
             logger.debug("Retrieved bars", 
                         symbol=symbol, 
@@ -441,11 +472,14 @@ class AlpacaClient:
                 period=period,
                 timeframe=timeframe
             )
+            raw = getattr(history, "_raw", history)
+            if not isinstance(raw, dict):
+                raw = {}
             return {
-                'timestamp': history.timestamp,
-                'equity': history.equity,
-                'profit_loss': history.profit_loss,
-                'profit_loss_pct': history.profit_loss_pct
+                'timestamp': raw.get('timestamp', []),
+                'equity': raw.get('equity', []),
+                'profit_loss': raw.get('profit_loss', []),
+                'profit_loss_pct': raw.get('profit_loss_pct', []),
             }
         except Exception as e:
             logger.error("Failed to get portfolio history", error=str(e))

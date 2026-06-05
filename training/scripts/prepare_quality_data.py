@@ -3,18 +3,50 @@
 Script to prepare high-quality training data for the algorithmic trading bot
 """
 
+import importlib.util
 import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import yfinance as yf
-
-sys.path.append(str(Path(__file__).parent.parent))
-
-from src.configuration import load_config
-from src.data.alpaca_client import AlpacaClient
+from dotenv import load_dotenv
 import structlog
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_alpaca = _load_module("alpaca_client", PROJECT_ROOT / "src" / "data" / "alpaca_client.py")
+AlpacaClient = _alpaca.AlpacaClient
+
+
+def ensure_timestamp_column(data: pd.DataFrame) -> pd.DataFrame:
+    """Alpaca bars use timestamp as the index; training expects a column."""
+    if data.empty:
+        return data
+
+    df = data.copy()
+    if "timestamp" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex) or df.index.name == "timestamp":
+            df = df.reset_index()
+        elif "index" in df.columns:
+            df = df.rename(columns={"index": "timestamp"})
+
+    if "timestamp" not in df.columns:
+        raise ValueError("Expected a timestamp column or DatetimeIndex on bar data")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df.reset_index(drop=True)
 
 logger = structlog.get_logger(__name__)
 
@@ -43,8 +75,7 @@ QUALITY_SYMBOLS = {
 }
 
 class DataQualityChecker:
-    def __init__(self, config):
-        self.config = config
+    def __init__(self):
         self.alpaca_client = AlpacaClient()
         
     def download_quality_data(self, symbols, days=730):
@@ -69,8 +100,8 @@ class DataQualityChecker:
                 )
                 
                 if bars is not None and len(bars) > 100:
-                    # Add symbol column
-                    bars['symbol'] = symbol
+                    bars = ensure_timestamp_column(bars)
+                    bars["symbol"] = symbol
                     
                     # Quality checks
                     bars = self.apply_quality_filters(bars, symbol)
@@ -95,6 +126,7 @@ class DataQualityChecker:
         
         if all_data:
             combined_data = pd.concat(all_data, ignore_index=True)
+            combined_data = ensure_timestamp_column(combined_data)
             logger.info(f"\nData download complete:")
             logger.info(f"  Total records: {len(combined_data):,}")
             logger.info(f"  Successful symbols: {len(symbols) - len(failed_symbols)}")
@@ -176,8 +208,7 @@ class DataQualityChecker:
 def main():
     """Main data preparation function"""
     
-    config = load_config()
-    checker = DataQualityChecker(config)
+    checker = DataQualityChecker()
     
     # Combine all symbols
     all_symbols = []
@@ -198,7 +229,7 @@ def main():
         checker.validate_data_quality(data)
         
         # Save to file
-        output_file = Path("data/historical_data_quality.parquet")
+        output_file = PROJECT_ROOT / "data" / "historical_data_quality.parquet"
         output_file.parent.mkdir(exist_ok=True)
         
         data.to_parquet(output_file, index=False)
@@ -219,11 +250,11 @@ def main():
         }
         
         import json
-        with open('data/data_quality_summary.json', 'w') as f:
+        with open(PROJECT_ROOT / "data" / "data_quality_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
         
         logger.info("\n✅ Data preparation complete!")
-        logger.info("Run training with: python src/train_models.py --data data/historical_data_quality.parquet")
+        logger.info("Run training with: python training/train_simple_massive.py --data data/historical_data_quality.parquet --symbols 10")
         
     else:
         logger.error("❌ Data preparation failed")

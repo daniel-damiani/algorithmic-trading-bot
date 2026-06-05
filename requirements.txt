@@ -2,8 +2,10 @@
 # Phase 1-5: Direct API Foundation
 
 # Trading & Data APIs
+websockets>=9.0,<11  # required by alpaca-trade-api (do not upgrade via yfinance)
 alpaca-trade-api>=3.1.0
 praw>=7.7.0  # Reddit API
+asyncpraw>=7.7.0  # Async Reddit API (sentiment analyzer)
 tweepy>=4.14.0  # Twitter API (optional)
 alpha-vantage>=2.3.1  # Fundamental data
 requests>=2.31.0  # HTTP requests
@@ -14,7 +16,7 @@ pandas>=2.1.0
 numpy>=1.24.0
 scipy>=1.11.0
 ta-lib>=0.4.26  # Technical analysis
-pandas-ta>=0.3.14b  # Additional TA indicators
+pandas-ta-classic>=0.6.20  # Additional TA indicators (replaces deleted pandas-ta)
 
 # Database & Caching
 sqlalchemy>=2.0.0

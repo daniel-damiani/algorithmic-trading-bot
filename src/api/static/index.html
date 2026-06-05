@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuantumSentiment Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="/static/app.js?v=7"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    body { background: radial-gradient(ellipse at top, #0f172a 0%, #020617 60%); }
+    .glass { background: rgba(15, 23, 42, 0.75); backdrop-filter: blur(12px); border: 1px solid rgba(148, 163, 184, 0.12); }
+    .tab-active { color: #34d399; border-color: #34d399; }
+    .tab-btn { flex-shrink: 0; min-height: 44px; }
+    .dashboard-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem;
+      -webkit-overflow-scrolling: touch;
+    }
+    .risk-tip { position: relative; display: inline-flex; }
+    .risk-tip .risk-tip-panel {
+      visibility: hidden; opacity: 0; pointer-events: none;
+      position: absolute; z-index: 40; left: 50%; transform: translateX(-50%);
+      bottom: calc(100% + 8px); width: min(280px, 85vw);
+      padding: 0.65rem 0.75rem; border-radius: 0.5rem;
+      background: rgba(15, 23, 42, 0.98); border: 1px solid rgba(148, 163, 184, 0.25);
+      font-size: 0.75rem; line-height: 1.45; color: #cbd5e1;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+      transition: opacity 0.15s ease, visibility 0.15s ease;
+    }
+    .risk-tip:hover .risk-tip-panel,
+    .risk-tip:focus-within .risk-tip-panel {
+      visibility: visible; opacity: 1;
+    }
+  </style>
+</head>
+<body class="h-full text-slate-100 min-h-screen" x-data="dashboardApp" x-init="init()">
+  <!-- Toast -->
+  <div x-show="toast" x-transition class="fixed top-4 right-4 z-50 max-w-sm">
+    <div class="glass rounded-lg px-4 py-3 shadow-xl text-sm"
+         :class="toast?.type === 'error' ? 'border-red-500/50 text-red-200' : 'border-emerald-500/50 text-emerald-100'">
+      <span x-text="toast?.msg"></span>
+    </div>
+  </div>
+
+  <div class="max-w-6xl mx-auto px-4 py-6 pb-24" x-cloak>
+    <!-- Header -->
+    <header class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-white">QuantumSentiment</h1>
+        <p class="text-slate-400 text-sm mt-1">LAN trading dashboard</p>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-xs px-2 py-1 rounded-full glass"
+              :class="botRunning() && botHealthy() ? 'text-emerald-400' : (botRunning() ? 'text-amber-400' : 'text-slate-400')"
+              x-text="botRunning() && botHealthy() ? 'Bot healthy' : (botRunning() ? 'Bot starting/stalled' : 'Bot stopped')"></span>
+        <button @click="refreshAll()" class="text-sm px-3 py-1.5 rounded-lg glass hover:bg-slate-800/80">Refresh</button>
+      </div>
+    </header>
+
+    <!-- API Key (controls) -->
+    <div class="glass rounded-xl p-4 mb-6">
+      <label class="text-xs text-slate-400 uppercase tracking-wide">Control API key</label>
+      <div class="flex gap-2 mt-2 flex-col sm:flex-row">
+        <input type="password" x-model="apiKey" placeholder="DASHBOARD_API_KEY"
+               class="flex-1 bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500" />
+        <button @click="saveApiKey()" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium">Save key</button>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">Required to start/stop the bot or run backtests. Stored in this browser only.</p>
+    </div>
+
+    <!-- Tabs (static buttons — reliable on iOS Safari; avoid x-for in nav) -->
+    <nav class="dashboard-nav mb-6 border-b border-slate-800 pb-px" role="tablist" aria-label="Dashboard sections">
+      <button type="button" role="tab" @click="selectTab('overview')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'overview' ? 'tab-active' : 'text-slate-400'">Overview</button>
+      <button type="button" role="tab" @click="selectTab('pnl')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'pnl' ? 'tab-active' : 'text-slate-400'">P&amp;L</button>
+      <button type="button" role="tab" @click="selectTab('positions')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'positions' ? 'tab-active' : 'text-slate-400'">Positions</button>
+      <button type="button" role="tab" @click="selectTab('risk')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'risk' ? 'tab-active' : 'text-slate-400'">Risk</button>
+      <button type="button" role="tab" @click="selectTab('backtest')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'backtest' ? 'tab-active' : 'text-slate-400'">Backtest</button>
+      <button type="button" role="tab" @click="selectTab('models')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'models' ? 'tab-active' : 'text-slate-400'">Models</button>
+      <button type="button" role="tab" @click="selectTab('activity')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'activity' ? 'tab-active' : 'text-slate-400'">Activity</button>
+      <button type="button" role="tab" @click="selectTab('assistant')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'assistant' ? 'tab-active' : 'text-slate-400'">Assistant</button>
+      <button type="button" role="tab" @click="selectTab('guide')" class="tab-btn px-4 py-2 text-sm whitespace-nowrap border-b-2 border-transparent" :class="tab === 'guide' ? 'tab-active' : 'text-slate-400'">Help</button>
+    </nav>
+
+    <!-- Overview -->
+    <section x-show="tab === 'overview'" class="space-y-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Equity</p>
+          <p class="text-2xl font-semibold mt-1 text-white" x-text="fmtMoney(accountEquity())"></p>
+        </div>
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Daily P&amp;L</p>
+          <p class="text-2xl font-semibold mt-1"
+             :class="(dailyPnl() || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'"
+             x-text="fmtMoney(dailyPnl()) + ' (' + fmtPct(dailyPnlPct()) + ')'"></p>
+        </div>
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Positions</p>
+          <p class="text-2xl font-semibold mt-1" x-text="overview?.positions_count ?? '—'"></p>
+        </div>
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Market</p>
+          <p class="text-2xl font-semibold mt-1"
+             x-text="overview?.health?.market_open ? 'Open' : 'Closed'"></p>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-4 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+        <div>
+          <p class="font-medium">Paper trading bot</p>
+          <p class="text-sm text-slate-400 mt-1">
+            <span x-show="botRunning() && botHealthy()">Running — last heartbeat: <span x-text="fmtTime(botStatus?.last_heartbeat?.timestamp)"></span></span>
+            <span x-show="botRunning() && !botHealthy()" class="text-amber-400">Process up but not trading yet (check log)</span>
+            <span x-show="!botRunning()">Not running</span>
+            <span x-show="botStatus?.last_heartbeat?.pending_signals != null && botRunning()" class="block text-xs mt-1">
+              Pending signals: <span x-text="botStatus?.last_heartbeat?.pending_signals ?? 0"></span>
+            </span>
+          </p>
+          <p x-show="botStatus?.diagnosis" class="text-xs text-amber-400/90 mt-2" x-text="botStatus?.diagnosis"></p>
+        </div>
+        <div class="flex gap-2">
+          <button @click="startBot()" :disabled="botRunning()"
+                  class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-sm font-medium">Start</button>
+          <button @click="stopBot()" :disabled="!botRunning()"
+                  class="px-4 py-2 rounded-lg bg-red-600/90 hover:bg-red-500 disabled:opacity-40 text-sm font-medium">Stop</button>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-4" x-show="botStatus?.log_tail?.length">
+        <p class="text-xs text-slate-400 uppercase mb-2">Bot log (tail)</p>
+        <pre class="text-xs text-slate-400 overflow-x-auto max-h-40 whitespace-pre-wrap" x-text="(botStatus?.log_tail || []).join('\n')"></pre>
+      </div>
+
+      <div class="glass rounded-xl p-4">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+          <div>
+            <p class="font-medium">Data sources</p>
+            <p class="text-sm text-slate-400 mt-0.5">Toggle optional APIs and feeds. Defaults follow keys in <code class="text-xs">.env</code>.</p>
+          </div>
+          <p class="text-xs text-slate-500" x-show="featuresSaving">Saving…</p>
+        </div>
+        <div class="space-y-2">
+          <template x-if="!features.length">
+            <p class="text-sm text-slate-500">Loading feature toggles…</p>
+          </template>
+          <template x-for="f in features" :key="f.id">
+            <label class="flex items-start gap-3 p-3 rounded-lg border border-slate-800/80 hover:bg-slate-800/20 cursor-pointer"
+                   :class="!f.available ? 'opacity-60 cursor-not-allowed' : ''">
+              <input type="checkbox" class="mt-1 rounded border-slate-600"
+                     :checked="f.enabled && f.available"
+                     :disabled="!f.available || featuresSaving"
+                     @change="toggleFeature(f, $event.target.checked)" />
+              <span class="flex-1 min-w-0">
+                <span class="font-medium text-sm flex flex-wrap items-center gap-2">
+                  <span x-text="f.label"></span>
+                  <span x-show="f.active" class="text-xs px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-300">Active</span>
+                  <span x-show="f.available && !f.enabled" class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-400">Off</span>
+                  <span x-show="!f.available" class="text-xs px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300">No key</span>
+                </span>
+                <span class="text-xs text-slate-400 block mt-0.5" x-text="f.description"></span>
+                <span x-show="f.missing_env?.length" class="text-xs text-amber-400/80 block mt-1">
+                  Missing: <span x-text="f.missing_env.join(', ')"></span>
+                </span>
+              </span>
+            </label>
+          </template>
+        </div>
+        <p class="text-xs text-slate-500 mt-3">Changes apply on the bot's next prediction cycle (no restart required). Restart dashboard if toggles don't appear.</p>
+      </div>
+
+      <div class="glass rounded-xl p-4" x-show="overview?.model">
+        <p class="text-xs text-slate-400 uppercase mb-2">Active model</p>
+        <p class="font-medium" x-text="overview?.model?.name + ' @ ' + overview?.model?.version"></p>
+      </div>
+    </section>
+
+    <!-- Daily P&L -->
+    <section x-show="tab === 'pnl'" class="space-y-4">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <p class="font-medium text-white">Daily P&amp;L</p>
+          <p class="text-sm text-slate-400 mt-1">End-of-day equity changes from your Alpaca paper account.</p>
+        </div>
+        <div class="flex flex-wrap gap-1">
+          <template x-for="p in pnlPeriodOptions" :key="p.k">
+            <button @click="setPnlPeriod(p.k)"
+                    class="px-3 py-1.5 rounded-lg text-xs font-medium"
+                    :class="pnlPeriod === p.k ? 'bg-emerald-600 text-white' : 'glass text-slate-400 hover:text-slate-200'"
+                    x-text="p.l"></button>
+          </template>
+        </div>
+      </div>
+
+      <div x-show="pnlLoading" class="text-sm text-slate-500 animate-pulse">Loading portfolio history…</div>
+      <div x-show="pnlHistory?.error && !pnlLoading" class="glass rounded-xl p-4 text-amber-400/90 text-sm" x-text="pnlHistory.error"></div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4" x-show="pnlHistory?.summary && !pnlLoading">
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Period P&amp;L</p>
+          <p class="text-xl font-semibold mt-1"
+             :class="(pnlHistory.summary.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'"
+             x-text="fmtMoney(pnlHistory.summary.total_pnl)"></p>
+        </div>
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Avg daily</p>
+          <p class="text-xl font-semibold mt-1"
+             :class="(pnlHistory.summary.avg_daily_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'"
+             x-text="fmtMoney(pnlHistory.summary.avg_daily_pnl)"></p>
+        </div>
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">Win / loss days</p>
+          <p class="text-xl font-semibold mt-1 text-white">
+            <span class="text-emerald-400" x-text="pnlHistory.summary.winning_days || 0"></span>
+            <span class="text-slate-500"> / </span>
+            <span class="text-red-400" x-text="pnlHistory.summary.losing_days || 0"></span>
+          </p>
+        </div>
+        <div class="glass rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase">End equity</p>
+          <p class="text-xl font-semibold mt-1 text-white" x-text="fmtMoney(pnlHistory.summary.end_equity)"></p>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-4" x-show="pnlHistory?.days?.length && !pnlLoading">
+        <p class="text-xs text-slate-400 uppercase mb-3">Daily P&amp;L chart</p>
+        <div class="h-56">
+          <canvas id="pnlChart"></canvas>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl overflow-hidden" x-show="pnlHistory?.days?.length && !pnlLoading">
+        <div class="overflow-x-auto max-h-80">
+          <table class="w-full text-sm">
+            <thead class="text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-900/95">
+              <tr>
+                <th class="text-left p-3">Date</th>
+                <th class="text-right p-3">Equity</th>
+                <th class="text-right p-3">Daily P&amp;L</th>
+                <th class="text-right p-3">Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="d in pnlDaysNewestFirst()" :key="d.date">
+                <tr class="border-b border-slate-800/50 hover:bg-slate-800/30">
+                  <td class="p-3 text-slate-300" x-text="d.date"></td>
+                  <td class="p-3 text-right" x-text="fmtMoney(d.equity)"></td>
+                  <td class="p-3 text-right"
+                      :class="d.pnl == null ? 'text-slate-500' : (d.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')"
+                      x-text="d.pnl == null ? '—' : fmtMoney(d.pnl)"></td>
+                  <td class="p-3 text-right"
+                      :class="d.pnl_percent == null ? 'text-slate-500' : (d.pnl_percent >= 0 ? 'text-emerald-400' : 'text-red-400')"
+                      x-text="d.pnl_percent == null ? '—' : fmtPct(d.pnl_percent)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p x-show="!pnlLoading && !(pnlHistory?.days?.length)" class="text-sm text-slate-500">
+        No daily history for this period yet.
+      </p>
+    </section>
+
+    <!-- Positions -->
+    <section x-show="tab === 'positions'">
+      <div class="glass rounded-xl overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="text-left p-3">Symbol</th>
+                <th class="text-left p-3">Side</th>
+                <th class="text-right p-3">Qty</th>
+                <th class="text-right p-3">Entry</th>
+                <th class="text-right p-3">Mark</th>
+                <th class="text-right p-3">P/L %</th>
+                <th class="text-right p-3">TP @</th>
+                <th class="text-right p-3">SL @</th>
+                <th class="text-right p-3">Total P/L</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-if="positions.length === 0">
+                <tr><td colspan="9" class="p-6 text-center text-slate-500">No open positions</td></tr>
+              </template>
+              <template x-for="p in positions" :key="p.symbol">
+                <tr class="border-b border-slate-800/50 hover:bg-slate-800/30">
+                  <td class="p-3 font-medium" x-text="p.symbol"></td>
+                  <td class="p-3">
+                    <span class="text-xs px-2 py-0.5 rounded"
+                          :class="p.side === 'short' ? 'bg-red-900/40 text-red-300' : 'bg-emerald-900/40 text-emerald-300'"
+                          x-text="p.side === 'short' ? 'Short' : 'Long'"></span>
+                  </td>
+                  <td class="p-3 text-right" x-text="p.quantity"></td>
+                  <td class="p-3 text-right" x-text="fmtMoney(p.entry_price ?? p.average_price)"></td>
+                  <td class="p-3 text-right" x-text="fmtMoney(p.current_price)"></td>
+                  <td class="p-3 text-right" :class="(p.profit_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'"
+                      x-text="(p.profit_pct != null ? p.profit_pct.toFixed(2) : '—') + '%'"></td>
+                  <td class="p-3 text-right text-slate-400" x-text="fmtMoney(p.take_profit_price)"></td>
+                  <td class="p-3 text-right text-slate-400" x-text="fmtMoney(p.stop_loss_price)"></td>
+                  <td class="p-3 text-right" :class="p.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'"
+                      x-text="fmtMoney(p.total_pnl)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Risk -->
+    <section x-show="tab === 'risk'" class="space-y-4">
+      <div>
+        <p class="font-medium text-white">Risk profile</p>
+        <p class="text-sm text-slate-400 mt-1">
+          Controls stop loss, take profit, position size, and portfolio limits. Applied on the bot's next cycle (no restart).
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <template x-for="p in riskSettings?.presets || []" :key="p.id">
+          <button type="button"
+                  @click="applyRiskPreset(p.id)"
+                  :disabled="riskSaving"
+                  class="glass rounded-xl p-4 text-left border transition-colors relative"
+                  :class="riskSettings?.preset === p.id ? 'border-emerald-500/60 bg-emerald-950/20' : 'border-slate-800 hover:border-slate-600'">
+            <div class="flex items-start justify-between gap-2">
+              <div>
+                <p class="font-medium text-white" x-text="p.label"></p>
+                <p class="text-xs text-emerald-400/90 mt-0.5" x-text="p.tagline"></p>
+              </div>
+              <span class="risk-tip shrink-0" @click.stop>
+                <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs cursor-help"
+                      tabindex="0" aria-label="Preset details">?</span>
+                <span class="risk-tip-panel" x-text="p.description"></span>
+              </span>
+            </div>
+            <p class="text-xs text-slate-500 mt-2" x-show="riskSettings?.preset === p.id">Active preset</p>
+          </button>
+        </template>
+      </div>
+
+      <p x-show="riskSettings?.preset === 'custom'" class="text-xs text-amber-400/90">
+        Custom — parameters differ from all presets. Adjust sliders below or pick a preset.
+      </p>
+
+      <div class="glass rounded-xl p-4">
+        <div class="flex items-center justify-between gap-2 mb-4">
+          <p class="font-medium">Parameters</p>
+          <p class="text-xs text-slate-500" x-show="riskSaving">Saving…</p>
+        </div>
+        <div class="space-y-5">
+          <template x-for="def in riskSettings?.param_defs || []" :key="def.key">
+            <div>
+              <div class="flex items-center justify-between gap-2 mb-1">
+                <label class="text-sm flex items-center gap-1.5">
+                  <span x-text="def.label"></span>
+                  <span class="risk-tip" x-show="def.hint">
+                    <span class="inline-flex w-4 h-4 items-center justify-center rounded-full bg-slate-800 text-slate-500 text-[10px] cursor-help" tabindex="0">?</span>
+                    <span class="risk-tip-panel" x-text="def.hint"></span>
+                  </span>
+                </label>
+                <span class="text-sm font-medium text-emerald-400/90" x-text="riskParamLabel(def.key)"></span>
+              </div>
+              <input type="range"
+                     class="w-full accent-emerald-500"
+                     :min="def.min" :max="def.max" :step="def.step"
+                     :value="riskSettings?.params?.[def.key] ?? 0"
+                     :disabled="riskSaving"
+                     @change="updateRiskParam(def.key, parseFloat($event.target.value))" />
+              <div class="flex justify-between text-[10px] text-slate-600 mt-0.5">
+                <span x-text="def.unit === 'multiple' ? def.min + '×' : (def.min * 100).toFixed(1) + '%'"></span>
+                <span x-text="def.unit === 'multiple' ? def.max + '×' : (def.max * 100).toFixed(1) + '%'"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-4 text-sm text-slate-400">
+        <p class="font-medium text-slate-300 mb-2">How exits work</p>
+        <ul class="list-disc list-inside space-y-1 text-xs">
+          <li><strong class="text-slate-300">Stop / take profit</strong> — checked every bot cycle; closes longs and covers shorts automatically.</li>
+          <li><strong class="text-slate-300">Daily loss &amp; drawdown</strong> — block <em>new</em> trades; existing positions still monitored for TP/SL.</li>
+          <li>Positions tab shows live TP/SL prices using these settings.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Backtest -->
+    <section x-show="tab === 'backtest'" class="space-y-4">
+      <div class="glass rounded-xl p-4">
+        <h2 class="font-medium mb-4">Run backtest</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-slate-400">Symbols (space-separated)</label>
+            <input x-model="backtestForm.symbols" class="w-full mt-1 bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Capital</label>
+            <input type="number" x-model="backtestForm.capital" class="w-full mt-1 bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Start date</label>
+            <input type="date" x-model="backtestForm.start_date" class="w-full mt-1 bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">End date</label>
+            <input type="date" x-model="backtestForm.end_date" class="w-full mt-1 bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm" />
+          </div>
+        </div>
+        <button @click="runBacktest()" class="mt-4 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium">Run backtest</button>
+      </div>
+
+      <div class="glass rounded-xl p-4" x-show="activeBacktest?.results">
+        <h3 class="font-medium mb-3">Results</h3>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm mb-4">
+          <div><span class="text-slate-400">Return</span><p class="font-medium" x-text="fmtPct(activeBacktest?.results?.total_return)"></p></div>
+          <div><span class="text-slate-400">Sharpe</span><p class="font-medium" x-text="activeBacktest?.results?.sharpe_ratio?.toFixed?.(2) ?? '—'"></p></div>
+          <div><span class="text-slate-400">Max DD</span><p class="font-medium" x-text="fmtPct(activeBacktest?.results?.max_drawdown)"></p></div>
+          <div><span class="text-slate-400">Trades</span><p class="font-medium" x-text="activeBacktest?.results?.total_trades ?? '—'"></p></div>
+        </div>
+        <div class="h-64"><canvas id="equityChart"></canvas></div>
+      </div>
+
+      <div class="glass rounded-xl p-4">
+        <h3 class="font-medium mb-3">Recent runs</h3>
+        <template x-if="backtestRuns.length === 0">
+          <p class="text-slate-500 text-sm">No backtests yet</p>
+        </template>
+        <ul class="space-y-2">
+          <template x-for="run in backtestRuns" :key="run.id">
+            <li class="flex items-center justify-between text-sm py-2 border-b border-slate-800/50">
+              <button @click="viewBacktest(run.id)" class="text-left hover:text-emerald-400">
+                <span x-text="run.id"></span>
+                <span class="text-slate-500 ml-2" x-text="run.status?.state"></span>
+              </button>
+              <span x-show="run.summary" x-text="fmtPct(run.summary?.total_return)"></span>
+            </li>
+          </template>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Models -->
+    <section x-show="tab === 'models'" class="space-y-3">
+      <template x-if="models.length === 0">
+        <div class="glass rounded-xl p-6 text-center text-slate-500">No trained models found in models/</div>
+      </template>
+      <template x-for="m in models" :key="m.name + m.version">
+        <div class="glass rounded-xl p-4">
+          <div class="flex justify-between items-start">
+            <div>
+              <p class="font-medium" x-text="m.name"></p>
+              <p class="text-sm text-slate-400" x-text="'Version ' + m.version"></p>
+            </div>
+            <span class="text-xs text-slate-500" x-text="m.path"></span>
+          </div>
+          <pre class="text-xs text-slate-400 mt-3 overflow-x-auto" x-text="JSON.stringify(m.metadata?.metrics || {}, null, 2)"></pre>
+        </div>
+      </template>
+    </section>
+
+    <!-- Activity -->
+    <section x-show="tab === 'activity'">
+      <div class="glass rounded-xl overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="text-left p-3">Time</th>
+                <th class="text-left p-3">Symbol</th>
+                <th class="text-left p-3">Side</th>
+                <th class="text-right p-3">Qty</th>
+                <th class="text-left p-3">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-if="orders.length === 0">
+                <tr><td colspan="5" class="p-6 text-center text-slate-500">No recent orders</td></tr>
+              </template>
+              <template x-for="(o, i) in orders" :key="i">
+                <tr class="border-b border-slate-800/50">
+                  <td class="p-3 text-slate-400 text-xs" x-text="fmtTime(o.submitted_at)"></td>
+                  <td class="p-3" x-text="o.symbol"></td>
+                  <td class="p-3 uppercase" x-text="o.side"></td>
+                  <td class="p-3 text-right" x-text="o.qty"></td>
+                  <td class="p-3" x-text="o.status"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Assistant (Ollama + live context) -->
+    <section x-show="tab === 'assistant'" class="space-y-4">
+      <div class="glass rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <p class="font-medium text-white">Trading assistant</p>
+          <p class="text-sm text-slate-400 mt-1">
+            Local Ollama with live Alpaca paper data, bot status, and app context.
+          </p>
+        </div>
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2 text-xs">
+          <span class="px-2 py-1 rounded-full glass w-fit"
+                :class="assistantStatus?.ollama_available ? 'text-emerald-400' : 'text-amber-400'"
+                x-text="assistantStatus?.ollama_available ? 'Ollama online' : 'Ollama offline'"></span>
+          <div class="flex items-center gap-2" x-show="assistantStatus?.ollama_available">
+            <label for="ollamaModelSelect" class="text-slate-500 shrink-0">Model</label>
+            <select id="ollamaModelSelect" x-model="selectedOllamaModel" @change="onOllamaModelChange()"
+                    class="bg-slate-900/80 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 max-w-[14rem]">
+              <template x-for="m in ollamaModels" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+              <option x-show="!ollamaModels.length" :value="selectedOllamaModel" x-text="selectedOllamaModel"></option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div x-show="assistantStatus && !assistantStatus.ollama_available"
+           class="glass rounded-xl p-4 border-amber-500/30 text-sm text-slate-300">
+        <p class="font-medium text-amber-400/90 mb-2">Ollama not reachable</p>
+        <ol class="list-decimal list-inside space-y-1 text-slate-400 text-xs">
+          <li>Install from <a href="https://ollama.com" class="text-emerald-400 underline" target="_blank" rel="noopener">ollama.com</a></li>
+          <li>Run: <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">ollama pull llama3.2:1b</code></li>
+          <li>Ensure Ollama is running (tray app on Windows)</li>
+          <li>Optional: set <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">OLLAMA_MODEL</code> in <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">.env</code></li>
+        </ol>
+      </div>
+
+      <div class="glass rounded-xl flex flex-col" style="min-height: 420px;">
+        <div class="flex-1 overflow-y-auto p-4 space-y-3 max-h-[50vh]" id="assistantChatScroll">
+          <template x-if="!chatMessages.length">
+            <p class="text-sm text-slate-500">Ask about positions, orders, bot status, backtests, or how the app works.</p>
+          </template>
+          <template x-for="(m, i) in chatMessages" :key="i">
+            <div class="flex" :class="m.role === 'user' ? 'justify-end' : 'justify-start'">
+              <div class="max-w-[85%] rounded-xl px-4 py-2 text-sm whitespace-pre-wrap"
+                   :class="m.role === 'user'
+                     ? 'bg-emerald-600/30 text-emerald-50'
+                     : 'bg-slate-800/80 text-slate-200 border border-slate-700/50'">
+                <span x-text="m.content"></span>
+              </div>
+            </div>
+          </template>
+          <div x-show="chatLoading" class="text-xs text-slate-500 animate-pulse">
+            Thinking… (<span x-text="selectedOllamaModel || 'model'"></span> runs locally; larger models take longer).
+          </div>
+        </div>
+        <div class="border-t border-slate-800 p-3 flex gap-2 flex-col sm:flex-row">
+          <div class="flex gap-2 flex-1">
+          <input type="text" x-model="chatInput" placeholder="e.g. What are my open positions?"
+                 @keydown.enter.prevent="sendChat()"
+                 :disabled="chatLoading || !(assistantStatus?.ollama_available)"
+                 class="flex-1 bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 disabled:opacity-50" />
+          </div>
+          <button @click="sendChat()"
+                  :disabled="chatLoading || !chatInput.trim() || !(assistantStatus?.ollama_available)"
+                  class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-sm font-medium">
+            Send
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500">Not financial advice. Read-only by default; uses same Alpaca keys as the dashboard. See Help for Cursor Alpaca MCP setup.</p>
+    </section>
+
+    <!-- Help / Guide -->
+    <section x-show="tab === 'guide'" class="space-y-4 text-sm text-slate-300 leading-relaxed">
+
+      <div class="glass rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-2">Getting started</h2>
+        <ol class="list-decimal list-inside space-y-2 text-slate-400">
+          <li>Start the dashboard on your PC: <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">.\scripts\run_dashboard.ps1</code></li>
+          <li>Open <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">http://localhost:8000</code> on this machine, or <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">http://&lt;your-pc-ip&gt;:8000</code> from a phone on the same Wi‑Fi.</li>
+          <li>Set <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">DASHBOARD_API_KEY</code> in your <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">.env</code> file, then save it in the <strong class="text-slate-300">Control API key</strong> field above (needed for Start/Stop and backtests).</li>
+          <li>Use <strong class="text-slate-300">Overview → Start</strong> to launch paper trading, or run a backtest first to validate the strategy.</li>
+        </ol>
+        <p class="mt-3 text-xs text-slate-500">Do not browse to <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">0.0.0.0</code> — that is the server bind address, not a user URL. If localhost shows an error, restart via the PowerShell script (it clears stale processes on port 8000).</p>
+      </div>
+
+      <div class="glass rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Control API key</h2>
+        <p class="text-slate-400 mb-2">Protects write actions on your home network: starting/stopping the bot and launching backtests. Read-only tabs (Overview, Positions, etc.) work without the key.</p>
+        <ul class="list-disc list-inside space-y-1 text-slate-400">
+          <li>Generate any long random string and add it to <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">.env</code> as <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">DASHBOARD_API_KEY=...</code></li>
+          <li>Paste the same value here and click <strong class="text-slate-300">Save key</strong> — stored only in this browser’s local storage</li>
+          <li>Restart the dashboard server after changing <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">.env</code></li>
+        </ul>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold text-emerald-400 mb-2">Overview</h3>
+          <p class="text-slate-400">Live snapshot of your Alpaca <strong class="text-slate-300">paper</strong> account and bot status. Refreshes every few seconds automatically.</p>
+          <ul class="mt-3 space-y-2 text-slate-500 text-xs">
+            <li><strong class="text-slate-400">Equity</strong> — total account value</li>
+            <li><strong class="text-slate-400">Daily P&amp;L</strong> — change vs. prior close</li>
+            <li><strong class="text-slate-400">Positions</strong> — count of open holdings</li>
+            <li><strong class="text-slate-400">Market</strong> — US market hours (bot may still run in paper mode when closed)</li>
+            <li><strong class="text-slate-400">Start / Stop</strong> — runs <code class="text-emerald-400/80">src/main.py --mode paper</code> as a background process; requires API key</li>
+            <li><strong class="text-slate-400">Last heartbeat</strong> — written by the bot each trading cycle; if missing while “running”, the process may have crashed</li>
+          </ul>
+        </div>
+
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold text-emerald-400 mb-2">P&amp;L</h3>
+          <p class="text-slate-400">Historical daily profit and loss from Alpaca portfolio history — end-of-day equity vs. the prior trading day.</p>
+          <ul class="mt-3 space-y-2 text-slate-500 text-xs">
+            <li><strong class="text-slate-400">1M / 3M / 6M / 1Y / All</strong> — time range for the chart and table</li>
+            <li><strong class="text-slate-400">Period P&amp;L</strong> — sum of daily changes in the selected window</li>
+            <li><strong class="text-slate-400">Win / loss days</strong> — count of up vs. down days</li>
+          </ul>
+        </div>
+
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold text-emerald-400 mb-2">Positions</h3>
+          <p class="text-slate-400">Open positions from your Alpaca paper account, synced on each refresh.</p>
+          <ul class="mt-3 space-y-2 text-slate-500 text-xs">
+            <li><strong class="text-slate-400">Qty</strong> — shares held (negative = short)</li>
+            <li><strong class="text-slate-400">Avg / Current</strong> — average entry vs. latest price</li>
+            <li><strong class="text-slate-400">Unrealized</strong> — open P&amp;L on the position</li>
+          </ul>
+          <p class="mt-3 text-xs text-slate-500">Data comes directly from Alpaca, not from the bot process — you can view positions even when the bot is stopped.</p>
+        </div>
+
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold text-emerald-400 mb-2">Backtest</h3>
+          <p class="text-slate-400">Run historical simulations using saved data and your trained XGBoost model. Results are stored under <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">cache/dashboard/backtests/</code>.</p>
+          <ul class="mt-3 space-y-2 text-slate-500 text-xs">
+            <li><strong class="text-slate-400">Symbols</strong> — space-separated tickers (e.g. <code class="text-emerald-400/80">AAPL MSFT</code>)</li>
+            <li><strong class="text-slate-400">Dates</strong> — use ranges covered by your data (parquet is roughly Jun–Nov 2024 today)</li>
+            <li><strong class="text-slate-400">Capital</strong> — starting cash for the simulation</li>
+            <li><strong class="text-slate-400">Return / Sharpe / Max DD / Trades</strong> — summary metrics when complete</li>
+            <li><strong class="text-slate-400">Equity chart</strong> — portfolio value over the backtest period</li>
+          </ul>
+          <p class="mt-3 text-xs text-slate-500">First run can take several minutes (model + FinBERT load). Requires API key. Progress polls automatically until done.</p>
+        </div>
+
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold text-emerald-400 mb-2">Models</h3>
+          <p class="text-slate-400">Lists trained models found in the <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">models/</code> folder (newest version per model name).</p>
+          <ul class="mt-3 space-y-2 text-slate-500 text-xs">
+            <li><strong class="text-slate-400">MarketRegimeXGBoost</strong> — primary model from <code class="text-emerald-400/80">train_simple_massive.py</code></li>
+            <li><strong class="text-slate-400">Metrics</strong> — validation accuracy and training metadata from <code class="text-emerald-400/80">metadata.json</code></li>
+          </ul>
+          <p class="mt-3 text-xs text-slate-500">Train with: <code class="text-emerald-400/80">python training/train_simple_massive.py --data data/historical_data_quality.parquet --symbols 10</code></p>
+        </div>
+
+        <div class="glass rounded-xl p-5 md:col-span-2">
+          <h3 class="font-semibold text-emerald-400 mb-2">Activity</h3>
+          <p class="text-slate-400">Recent orders from your Alpaca paper account (buys, sells, fills, cancellations). Useful to confirm the bot is placing trades.</p>
+          <p class="mt-2 text-xs text-slate-500">Shows the last 10 orders. Status values include <em>filled</em>, <em>new</em>, <em>canceled</em>, etc.</p>
+        </div>
+
+        <div class="glass rounded-xl p-5 md:col-span-2">
+          <h3 class="font-semibold text-emerald-400 mb-2">Assistant</h3>
+          <p class="text-slate-400">Chat with a local <strong class="text-slate-300">Ollama</strong> model that receives a live snapshot of your paper account, bot heartbeat, models, and recent backtests — so you can ask things like “why no trades today?” or “explain my largest position.”</p>
+          <ul class="mt-3 space-y-2 text-slate-500 text-xs">
+            <li><strong class="text-slate-400">Setup</strong> — Install Ollama, run <code class="text-emerald-400/80">ollama pull llama3.2:1b</code> (default; switch models in the Assistant tab)</li>
+            <li><strong class="text-slate-400">Model picker</strong> — dropdown lists all models Ollama has pulled on this PC; choice is saved in your browser</li>
+            <li><strong class="text-slate-400">OLLAMA_BASE_URL</strong> — default <code class="text-emerald-400/80">http://127.0.0.1:11434</code> (must run on the PC hosting the dashboard)</li>
+            <li><strong class="text-slate-400">Tools</strong> — the model can refresh Alpaca snapshot and bot status mid-conversation (same read-only data as the other tabs)</li>
+            <li><strong class="text-slate-400">Alpaca MCP in Cursor</strong> — for IDE-side questions, add the official Alpaca MCP server in Cursor settings (see below)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-2">Alpaca MCP in Cursor (optional)</h2>
+        <p class="text-slate-400 mb-3">The dashboard assistant uses your existing <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">.env</code> Alpaca keys via the API. For richer tooling inside <strong class="text-slate-300">Cursor</strong>, install the official Alpaca MCP server and point it at the same keys:</p>
+        <pre class="text-xs bg-slate-900/80 rounded-lg p-4 overflow-x-auto text-slate-300 border border-slate-700">{
+  "mcpServers": {
+    "alpaca": {
+      "command": "uvx",
+      "args": ["alpaca-mcp-server", "serve"],
+      "env": {
+        "ALPACA_API_KEY": "your_key",
+        "ALPACA_SECRET_KEY": "your_secret",
+        "ALPACA_PAPER": "true"
+      }
+    }
+  }
+}</pre>
+        <p class="mt-3 text-xs text-slate-500">Use paper keys from Alpaca dashboard. Package: <code class="text-emerald-400/80">pip install alpaca-mcp-server</code> or <code class="text-emerald-400/80">uvx alpaca-mcp-server</code>. Docs: <a href="https://github.com/alpacahq/alpaca-mcp-server" class="text-emerald-400 underline" target="_blank" rel="noopener">github.com/alpacahq/alpaca-mcp-server</a></p>
+      </div>
+
+      <div class="glass rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-2">LAN access from phone or tablet</h2>
+        <ul class="list-disc list-inside space-y-2 text-slate-400">
+          <li>If tabs or data look missing after an update, force-refresh: Safari → reload icon (or close tab and reopen). iPad caches scripts aggressively.</li>
+          <li>PC and device must be on the <strong class="text-slate-300">same Wi‑Fi</strong></li>
+          <li>Find your PC IP: <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">ipconfig</code> → IPv4 Address (e.g. 192.168.0.136)</li>
+          <li>Open <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">http://&lt;that-ip&gt;:8000</code></li>
+          <li>If it fails, allow inbound TCP port <strong class="text-slate-300">8000</strong> in Windows Firewall (Private network only)</li>
+        </ul>
+      </div>
+
+      <div class="glass rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-2">Typical workflow</h2>
+        <div class="space-y-3 text-slate-400">
+          <p><span class="text-emerald-400 font-medium">1. Validate</span> — Run a backtest on dates you have data for; check return, drawdown, and trade count.</p>
+          <p><span class="text-emerald-400 font-medium">2. Paper trade</span> — Start the bot from Overview; watch Activity for orders and Positions for holdings.</p>
+          <p><span class="text-emerald-400 font-medium">3. Monitor</span> — Keep the dashboard open on a phone via LAN, or hit Refresh periodically.</p>
+          <p><span class="text-emerald-400 font-medium">4. Stop</span> — Use Stop when you want to halt new signals (existing positions remain at Alpaca until closed).</p>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-5 border-amber-500/20">
+        <h2 class="text-lg font-semibold text-amber-400/90 mb-2">Important notes</h2>
+        <ul class="list-disc list-inside space-y-2 text-slate-400 text-xs">
+          <li>This is <strong class="text-slate-300">paper trading</strong> only unless you change bot mode manually — no real money.</li>
+          <li>The dashboard and bot are separate processes; stopping the dashboard does not stop the bot.</li>
+          <li>Backtest performance does not guarantee live results — slippage, sentiment, and data gaps affect real runs.</li>
+          <li>API docs for developers: <code class="text-emerald-400/90 bg-slate-900/80 px-1 rounded">/docs</code> on this server.</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+  <script>
+    /* Unhide UI if Alpine is slow or cached JS mismatches (common on iPad Safari) */
+    setTimeout(function () {
+      document.querySelectorAll('[x-cloak]').forEach(function (el) {
+        el.removeAttribute('x-cloak');
+      });
+    }, 2000);
+  </script>
+</body>
+</html>

@@ -4,8 +4,11 @@ Simple direct training with massive dataset - no complex pipeline.
 """
 
 import sys
-import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import importlib.util
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 import numpy as np
@@ -19,8 +22,13 @@ import xgboost as xgb
 import warnings
 warnings.filterwarnings('ignore')
 
-# Import features
-from src.features.universal_features import UniversalFeatureGenerator
+_features = importlib.util.spec_from_file_location(
+    "universal_features",
+    PROJECT_ROOT / "src" / "features" / "universal_features.py",
+)
+_universal_features = importlib.util.module_from_spec(_features)
+_features.loader.exec_module(_universal_features)
+UniversalFeatureGenerator = _universal_features.UniversalFeatureGenerator
 
 logger = structlog.get_logger()
 
@@ -35,8 +43,10 @@ def load_massive_data(data_path: str, n_symbols: int = 30) -> pd.DataFrame:
     # Fix column names
     df.columns = [col.lower().replace(' ', '_') for col in df.columns]
     
-    # Rename Date to timestamp if needed
-    if 'date' in df.columns:
+    # Normalize timestamp column
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    elif 'date' in df.columns:
         df['timestamp'] = pd.to_datetime(df['date'])
         df.drop('date', axis=1, inplace=True)
     
@@ -119,7 +129,7 @@ def create_enhanced_features(df: pd.DataFrame) -> pd.DataFrame:
             features_df.loc[mask, 'vpt'] = symbol_data['vpt']
     
     # Fill any remaining NaN values
-    features_df = features_df.fillna(method='ffill').fillna(0)
+    features_df = features_df.ffill().fillna(0)
     
     logger.info(f"Enhanced features created: {features_df.shape[1]} columns")
     return features_df
@@ -242,6 +252,16 @@ def main():
         
         # Train enhanced model
         model, accuracy, f1 = train_enhanced_model(X_train, X_val, y_train, y_val)
+
+        from training.model_io import save_massive_training_model
+
+        model_dir = save_massive_training_model(
+            model=model,
+            feature_names=feature_cols,
+            metrics={"accuracy": float(accuracy), "f1": float(f1)},
+        )
+        print(f"Model saved to: {model_dir}")
+        print("Backtest: python backtest.py --start-date 2024-06-01 --end-date 2024-09-30")
         
         # Results
         print(f"\n{'='*60}")
@@ -279,7 +299,7 @@ def main():
 - **Status**: {'🎯 TARGET ACHIEVED!' if status == 'SUCCESS' else '✅ Good Progress' if status == 'PROGRESS' else '⚠️ Improvement Needed' if status == 'IMPROVEMENT' else '❌ Poor Performance'}
 """
         
-        with open("EXPERIMENT_LOG.md", "a") as f:
+        with open(PROJECT_ROOT / "EXPERIMENT_LOG.md", "a", encoding="utf-8") as f:
             f.write(experiment_text)
         
         return 0 if accuracy >= args.target else 1

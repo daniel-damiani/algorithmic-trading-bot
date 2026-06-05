@@ -71,7 +71,7 @@ class SentimentFeatures:
             Dictionary of sentiment features
         """
         if sentiment_data.empty:
-            logger.warning("No sentiment data available", symbol=symbol)
+            logger.debug("No sentiment data available", symbol=symbol)
             return self._get_empty_features()
         
         try:
@@ -155,7 +155,10 @@ class SentimentFeatures:
             
             # Weighted average sentiment (by confidence)
             if len(sentiment_scores) > 0:
-                weighted_sentiment = np.average(sentiment_scores, weights=confidences)
+                if np.sum(confidences) > 0:
+                    weighted_sentiment = np.average(sentiment_scores, weights=confidences)
+                else:
+                    weighted_sentiment = np.mean(sentiment_scores)
                 features['sentiment_avg_24h'] = weighted_sentiment
                 features['sentiment_raw_avg_24h'] = np.mean(sentiment_scores)
                 features['sentiment_std_24h'] = np.std(sentiment_scores)
@@ -282,7 +285,12 @@ class SentimentFeatures:
                 sentiment_scores = source_data['sentiment_score'].values
                 confidences = source_data['confidence'].values
                 
-                weighted_sentiment = np.average(sentiment_scores, weights=confidences) if len(sentiment_scores) > 0 else 0
+                if len(sentiment_scores) > 0 and np.sum(confidences) > 0:
+                    weighted_sentiment = np.average(sentiment_scores, weights=confidences)
+                elif len(sentiment_scores) > 0:
+                    weighted_sentiment = np.mean(sentiment_scores)
+                else:
+                    weighted_sentiment = 0.0
                 features[f'{source}_sentiment_24h'] = weighted_sentiment
                 features[f'{source}_confidence_24h'] = np.mean(confidences) if len(confidences) > 0 else 0
                 

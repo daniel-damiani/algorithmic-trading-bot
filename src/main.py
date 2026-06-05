@@ -15,7 +15,9 @@ Features:
 
 import asyncio
 import argparse
+import json
 import os
+import signal
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
@@ -111,6 +113,7 @@ class QuantumSentimentBot:
         self.sentiment_analyzer = None
         self.feature_pipeline = None
         self.ensemble_model = None
+        self._universal_feature_gen = None
         self.portfolio_optimizer = None
         self.risk_engine = None
         self.position_sizer = None
@@ -174,7 +177,21 @@ class QuantumSentimentBot:
             )
             news_aggregator = NewsAggregator(news_config)
             news_aggregator.initialize()  # Initialize News aggregator
-            
+
+            from src.sentiment.unusual_whales_analyzer import (
+                UnusualWhalesAnalyzer,
+                UnusualWhalesConfig,
+                to_fusion_payload,
+            )
+
+            uw_cfg = getattr(self.config.data_sources, "unusual_whales", None)
+            scrape_delay = getattr(uw_cfg, "scrape_delay", 900) if uw_cfg else 900
+            unusual_whales_analyzer = UnusualWhalesAnalyzer(
+                UnusualWhalesConfig(cache_ttl_seconds=int(scrape_delay))
+            )
+            self.unusual_whales_analyzer = unusual_whales_analyzer
+            self._unusual_whales_initialized = False
+
             # Store analyzers for sentiment fusion
             self.reddit_analyzer = reddit_analyzer
             self.news_aggregator = news_aggregator
@@ -186,54 +203,119 @@ class QuantumSentimentBot:
             
             # Create a wrapper that combines analyzers and fusion
             class SentimentManager:
-                def __init__(self, reddit_analyzer, news_aggregator, sentiment_fusion):
+                def __init__(
+                    self,
+                    reddit_analyzer,
+                    news_aggregator,
+                    sentiment_fusion,
+                    unusual_whales_analyzer,
+                    bot,
+                ):
                     self.reddit_analyzer = reddit_analyzer
-                    self.news_aggregator = news_aggregator  
+                    self.news_aggregator = news_aggregator
                     self.sentiment_fusion = sentiment_fusion
-                
+                    self.unusual_whales_analyzer = unusual_whales_analyzer
+                    self._bot = bot
+
+                async def _ensure_unusual_whales(self) -> bool:
+                    from src.feature_flags import is_active
+
+                    if not is_active("unusual_whales"):
+                        return False
+                    if not getattr(self._bot, "_unusual_whales_initialized", False):
+                        loop = asyncio.get_running_loop()
+                        ok = await loop.run_in_executor(
+                            None, self.unusual_whales_analyzer.initialize
+                        )
+                        self._bot._unusual_whales_initialized = bool(ok)
+                    return (
+                        self._bot._unusual_whales_initialized
+                        and self.unusual_whales_analyzer.scraper_ready
+                    )
+
                 async def fuse_sentiment(self, symbol):
-                    """Get sentiment from all sources and fuse them"""
+                    """Get sentiment from enabled sources and fuse them."""
+                    from src.feature_flags import is_active, news_sources_active
+
+                    class NeutralSentimentResult:
+                        def __init__(self):
+                            self.score = 0.0
+                            self.confidence = 0.0
+                            self.sources = []
+                            self.timestamp = datetime.now()
+
+                    use_reddit = is_active("reddit")
+                    news_sources = news_sources_active()
+                    use_news = bool(news_sources)
+                    use_uw = is_active("unusual_whales")
+
+                    if not use_reddit and not use_news and not use_uw:
+                        return NeutralSentimentResult()
+
                     sentiment_data = {}
-                    
-                    # Get Reddit sentiment
-                    try:
-                        reddit_result = await self.reddit_analyzer.analyze_symbol(symbol)
-                        if reddit_result:
-                            sentiment_data['reddit'] = reddit_result
-                    except Exception as e:
-                        logger.warning(f"Reddit sentiment failed for {symbol}: {e}")
-                    
-                    # Get News sentiment  
-                    try:
-                        news_result = self.news_aggregator.analyze_symbol(symbol)
-                        if news_result:
-                            sentiment_data['news'] = news_result
-                    except Exception as e:
-                        logger.warning(f"News sentiment failed for {symbol}: {e}")
-                    
-                    # Fuse sentiments if we have any data
+
+                    if use_reddit:
+                        try:
+                            reddit_result = await self.reddit_analyzer.analyze_symbol(symbol)
+                            if reddit_result:
+                                sentiment_data["reddit"] = reddit_result
+                        except Exception as e:
+                            logger.warning(f"Reddit sentiment failed for {symbol}: {e}")
+
+                    if use_news:
+                        try:
+                            news_result = self.news_aggregator.analyze_symbol(
+                                symbol, enabled_sources=news_sources
+                            )
+                            if news_result:
+                                sentiment_data["news"] = news_result
+                        except Exception as e:
+                            logger.warning(f"News sentiment failed for {symbol}: {e}")
+
+                    if use_uw:
+                        try:
+                            if await self._ensure_unusual_whales():
+                                loop = asyncio.get_running_loop()
+                                uw_result = await loop.run_in_executor(
+                                    None,
+                                    self.unusual_whales_analyzer.analyze_symbol,
+                                    symbol,
+                                )
+                                uw_payload = to_fusion_payload(uw_result)
+                                if uw_payload:
+                                    sentiment_data["unusual_whales"] = uw_payload
+                                else:
+                                    logger.debug(
+                                        "Unusual Whales: no recent trades for symbol",
+                                        symbol=symbol,
+                                        congress=uw_result.get("total_congress_trades", 0),
+                                    )
+                            else:
+                                logger.warning(
+                                    "Unusual Whales enabled but scraper not ready "
+                                    "(install Playwright: playwright install chromium)"
+                                )
+                        except Exception as e:
+                            logger.warning(f"Unusual Whales failed for {symbol}: {e}")
+
                     if sentiment_data:
                         fused_result = self.sentiment_fusion.fuse_sentiment(sentiment_data, symbol)
-                        
-                        # Convert to expected format
+
                         class FusedSentimentResult:
                             def __init__(self, fused_data):
-                                self.score = fused_data.get('sentiment_score', 0.0)
-                                self.confidence = fused_data.get('confidence', 0.0)
-                                self.sources = list(sentiment_data.keys())
-                                self.timestamp = datetime.now()
-                        
+                                self.score = fused_data.get(
+                                    "fused_sentiment",
+                                    fused_data.get("sentiment_score", 0.0),
+                                )
+                                self.confidence = fused_data.get(
+                                    "fusion_confidence",
+                                    fused_data.get("confidence", 0.0),
+                                )
+                                self.sources = fused_data.get("sources_used", [])
+                                self.timestamp = fused_data.get("timestamp", datetime.now())
+
                         return FusedSentimentResult(fused_result)
-                    else:
-                        # Return neutral sentiment if no data
-                        class NeutralSentimentResult:
-                            def __init__(self):
-                                self.score = 0.0
-                                self.confidence = 0.0
-                                self.sources = []
-                                self.timestamp = datetime.now()
-                        
-                        return NeutralSentimentResult()
+                    return NeutralSentimentResult()
                 
                 async def get_aggregated_sentiment(self, symbols):
                     """For backward compatibility with connectivity check"""
@@ -245,7 +327,13 @@ class QuantumSentimentBot:
                         'timestamp': result.timestamp
                     }
             
-            self.sentiment_analyzer = SentimentManager(reddit_analyzer, news_aggregator, self.sentiment_fusion)
+            self.sentiment_analyzer = SentimentManager(
+                reddit_analyzer,
+                news_aggregator,
+                self.sentiment_fusion,
+                unusual_whales_analyzer,
+                self,
+            )
             
             # 4. Initialize feature pipeline
             logger.info("Initializing feature pipeline...")
@@ -325,6 +413,12 @@ class QuantumSentimentBot:
             
             # 13. Log strategy configuration
             self._log_strategy_configuration()
+
+            # 14. Apply dashboard risk preset (defaults to low / conservative)
+            from src.risk_settings import apply_params_to_config
+
+            applied = apply_params_to_config(self.config)
+            logger.info("Runtime risk settings applied", preset_file="cache/dashboard/risk_settings.json", **applied)
             
             logger.info("System initialization completed successfully")
             return True
@@ -409,27 +503,27 @@ class QuantumSentimentBot:
             self.dynamic_discovery = None
     
     async def _load_ensemble_model(self, persistence: ModelPersistence) -> Any:
-        """Load the best performing trained model - SimpleBalanced prioritized for stability"""
+        """Load the best performing trained model."""
         
         model_load_errors = []
         
-        # PRIORITY: Load SimpleBalanced model first (most stable and balanced)
+        # PRIORITY: sklearn XGBoost saved by train_simple_massive.py
         try:
-            from src.models.simple_balanced_wrapper import SimpleBalancedModel
-            model = SimpleBalancedModel()
-            
-            logger.info("Loaded SimpleBalanced model successfully (BALANCED PREDICTIONS)", 
-                       features=len(model.feature_names))
-            
-            # Verify the model has required methods
-            if not hasattr(model, 'predict_proba'):
-                raise RuntimeError(f"SimpleBalanced model missing predict_proba method")
-            
+            from src.models.sklearn_xgboost_predictor import SklearnXGBoostPredictor
+            from pathlib import Path
+
+            model = SklearnXGBoostPredictor.load_latest(
+                models_root=Path(self.config.paths.models)
+            )
+            logger.info(
+                "Loaded MarketRegimeXGBoost (train_simple_massive)",
+                features=len(model.feature_names),
+                path=str(model.model_dir),
+            )
             return model
-            
         except Exception as e:
-            model_load_errors.append(f"MarketRegimeXGBoost: {e}")
-            logger.error(f"Failed to load MarketRegimeXGBoost (best model): {e}")
+            model_load_errors.append(f"MarketRegimeXGBoost/sklearn: {e}")
+            logger.warning("Sklearn XGBoost model not loaded", error=str(e))
         
         # FALLBACK: Try other individual models if MarketRegimeXGBoost fails
         fallback_models = ['XGBoost', 'xgboost_model']
@@ -549,6 +643,10 @@ class QuantumSentimentBot:
         self.is_running = True
         logger.info(f"🚀 STARTING MAIN TRADING LOOP - Mode: {self.mode}")
         logger.info(f"🏪 Market is open: {self.broker.is_market_open()}")
+        self._write_dashboard_heartbeat(
+            {"note": "trading loop started"},
+            {"active_positions": 0},
+        )
         
         try:
             while self.is_running:
@@ -583,6 +681,10 @@ class QuantumSentimentBot:
         
         cycle_start_time = datetime.now()
         logger.info(f"🔄 TRADING CYCLE START - {cycle_start_time.strftime('%H:%M:%S')}")
+
+        from src.risk_settings import apply_params_to_config
+
+        apply_params_to_config(self.config)
         
         try:
             # 1. Update market data
@@ -601,29 +703,34 @@ class QuantumSentimentBot:
             
             # 3. Check comprehensive risk limits
             logger.info("⚠️ Performing comprehensive risk assessment...")
-            if not await self._check_risk_limits():
-                logger.warning("🛑 Risk limits exceeded, trading halted for this cycle")
-                return
-            
-            # 4. Execute pending signals
-            await self._execute_signals()
-            
-            # 5. Monitor positions
+            trading_allowed = await self._check_risk_limits()
+            if not trading_allowed:
+                logger.warning("🛑 Risk limits exceeded, new trades halted this cycle")
+            else:
+                # 4. Execute pending signals
+                await self._execute_signals()
+
+            # Always sync and monitor exits (TP/SL) even when new trades are blocked
+            await self.broker.sync_positions()
             logger.info("👀 Monitoring positions...")
             await self._monitor_positions()
-            
-            # 6. Update performance metrics
-            logger.info("📊 Updating performance metrics...")
-            await self._update_metrics()
-            
+
             # Cycle summary
             cycle_duration = (datetime.now() - cycle_start_time).total_seconds()
             positions = self.position_tracker.get_all_positions()
             active_positions = [p for p in positions if not p.is_flat]
-            logger.info(f"✅ CYCLE COMPLETE ({cycle_duration:.1f}s) - {len(active_positions)} active positions")
-            
+            logger.info(
+                f"✅ CYCLE COMPLETE ({cycle_duration:.1f}s) - "
+                f"{len(active_positions)} active positions"
+            )
+
         except Exception as e:
             logger.error("Error in trading cycle", error=str(e))
+        finally:
+            try:
+                await self._update_metrics()
+            except Exception as exc:
+                logger.error("Failed to update metrics", error=str(exc))
     
     async def _trading_cycle_backtest(self, symbols: List[str], timestamp: datetime) -> None:
         """
@@ -637,6 +744,9 @@ class QuantumSentimentBot:
         logger.info(f"🔄 BACKTEST CYCLE - {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
         
         try:
+            # Only act on signals from the current bar (hourly backtests accumulate stale signals otherwise)
+            self.pending_signals.clear()
+
             # 1. Generate predictions for current timestamp
             if symbols:
                 await self._generate_predictions_backtest(symbols, timestamp)
@@ -656,6 +766,101 @@ class QuantumSentimentBot:
             logger.error("Error in backtest trading cycle", 
                         error=str(e), timestamp=timestamp)
     
+    def _interpret_model_prediction(
+        self,
+        probas: Optional[np.ndarray] = None,
+        raw_prediction: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Convert model probabilities to a trading signal.
+
+        train_simple_massive uses 5 classes:
+        0=strong down, 1=down, 2=hold, 3=up, 4=strong up.
+        """
+        signal_threshold = getattr(self.config.trading, "signal_threshold", 0.5)
+        confidence_threshold = getattr(self.config.trading, "confidence_threshold", 0.4)
+
+        if probas is not None and isinstance(probas, np.ndarray) and probas.size > 0:
+            p = probas[0] if probas.ndim > 1 else probas
+            n_classes = len(p)
+
+            if n_classes == 2:
+                bear_prob = float(p[0])
+                bull_prob = float(p[1])
+            elif n_classes >= 5:
+                bear_prob = float(p[0] + p[1])
+                bull_prob = float(p[3] + p[4])
+            elif n_classes == 3:
+                bear_prob, bull_prob = float(p[0]), float(p[2])
+            else:
+                bull_prob = float(p[-1])
+                bear_prob = float(np.sum(p[:-1]))
+
+            direction_score = bull_prob - bear_prob
+            winning_prob = bull_prob if direction_score >= 0 else bear_prob
+            strength = max(abs(direction_score), winning_prob)
+            min_edge = max(0.05, (1.0 - signal_threshold) * 0.2)
+            min_prob = max(0.2, signal_threshold * 0.5)
+
+            if direction_score >= min_edge and bull_prob >= min_prob:
+                confidence = bull_prob / max(bull_prob + bear_prob, 1e-9)
+                if confidence >= confidence_threshold:
+                    return {
+                        "signal": "buy",
+                        "strength": strength,
+                        "confidence": confidence,
+                        "bull_prob": bull_prob,
+                        "bear_prob": bear_prob,
+                    }
+
+            if direction_score <= -min_edge and bear_prob >= min_prob:
+                confidence = bear_prob / max(bull_prob + bear_prob, 1e-9)
+                if confidence >= confidence_threshold:
+                    return {
+                        "signal": "sell",
+                        "strength": strength,
+                        "confidence": confidence,
+                        "bull_prob": bull_prob,
+                        "bear_prob": bear_prob,
+                    }
+            return None
+
+        if raw_prediction is not None:
+            pred = float(raw_prediction)
+            strength = abs(pred - 0.5) * 2
+            confidence = min(1.0, strength + 0.2)
+            edge = (1.0 - signal_threshold) * 0.1
+            if pred > 0.5 + edge and confidence >= confidence_threshold:
+                return {"signal": "buy", "strength": strength, "confidence": confidence}
+            if pred < 0.5 - edge and confidence >= confidence_threshold:
+                return {"signal": "sell", "strength": strength, "confidence": confidence}
+        return None
+
+    def _position_market_price(self, position) -> float:
+        """Mark price for a position-tracker Position (no current_price field)."""
+        if self.position_tracker is not None:
+            prices = getattr(self.position_tracker, "market_prices", None) or {}
+            mark = prices.get(position.symbol)
+            if mark is not None:
+                return float(mark)
+        return float(getattr(position, "average_price", 0.0) or 0.0)
+
+    def _position_exit_levels(self, position) -> Dict[str, Any]:
+        """Stop/take-profit metrics for logging and monitoring."""
+        from src.broker.position_exits import compute_exit_levels
+
+        mark = self._position_market_price(position)
+        side = "short" if position.is_short else "long"
+        stop_loss_pct = getattr(self.config.risk, "stop_loss_pct", 0.05)
+        take_profit_pct = getattr(self.config.risk, "take_profit_pct", 0.15)
+        return compute_exit_levels(
+            side=side,
+            avg_entry=float(position.average_price or 0),
+            mark=mark,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+        )
+
     async def _generate_predictions_backtest(
         self, 
         symbols: List[str], 
@@ -709,15 +914,24 @@ class QuantumSentimentBot:
                 sentiment_df = pd.DataFrame([sentiment_dict])
                 sentiment_df.set_index('timestamp', inplace=True)
                 
-                # Generate features
+                # Generate features (match training pipeline when using train_simple_massive model)
                 logger.info(f"🔧 Generating features for {symbol}")
-                feature_result = self.feature_pipeline.generate_features(
-                    symbol=symbol,
-                    market_data=bars,
-                    sentiment_data=sentiment_df
-                )
-                
-                features_dict = feature_result.get('features', {})
+                if getattr(self.ensemble_model, "requires_universal_features", False):
+                    if self._universal_feature_gen is None:
+                        from src.features.universal_features import UniversalFeatureGenerator
+                        self._universal_feature_gen = UniversalFeatureGenerator()
+                    bars_df = bars.reset_index()
+                    if "timestamp" not in bars_df.columns:
+                        bars_df = bars_df.rename(columns={bars_df.columns[0]: "timestamp"})
+                    feat_df = self._universal_feature_gen.generate_features(bars_df)
+                    features_dict = feat_df.iloc[-1].to_dict()
+                else:
+                    feature_result = self.feature_pipeline.generate_features(
+                        symbol=symbol,
+                        market_data=bars,
+                        sentiment_data=sentiment_df,
+                    )
+                    features_dict = feature_result.get("features", {})
                 logger.info(f"📊 Generated {len(features_dict)} features for {symbol}")
                 if not features_dict:
                     logger.info(f"❌ No features generated for {symbol}")
@@ -754,74 +968,48 @@ class QuantumSentimentBot:
                     logger.info(f"🔍 Features for {symbol}: {list(features.columns)[:5]}... (total: {features.shape[1]} features, {features.shape[0]} rows)")
                     
                     # Try to get a simple prediction - using predict_proba or predict
+                    probas = None
                     raw_prediction = None
                     
                     # For classification models, get probability
                     if hasattr(self.ensemble_model, 'predict_proba'):
                         try:
-                            # Pass features directly to model - it will handle extraction
                             probas = self.ensemble_model.predict_proba(features_dict)
-                            
-                            logger.info(f"🎯 Predict proba result: shape={probas.shape if hasattr(probas, 'shape') else 'no shape'}, values={probas}")
-                            if isinstance(probas, np.ndarray) and probas.size > 0:
-                                # For binary classification (0=bearish, 1=bullish)
-                                if probas.shape[1] == 2:
-                                    raw_prediction = probas[0, 1]  # Bullish probability
-                                    logger.info(f"🎯 Binary classification - bullish prob: {raw_prediction}")
-                                # For multi-class market regime
-                                elif probas.shape[1] >= 5:
-                                    # Assuming classes: strong_bear=0, bear=1, sideways=2, bull=3, strong_bull=4, volatile=5
-                                    bull_prob = probas[0, 3] if probas.shape[1] > 3 else 0.0
-                                    strong_bull_prob = probas[0, 4] if probas.shape[1] > 4 else 0.0
-                                    raw_prediction = bull_prob + strong_bull_prob  # Combined bullish probability
-                                    logger.info(f"🎯 Multi-class - bull: {bull_prob}, strong_bull: {strong_bull_prob}, combined: {raw_prediction}")
-                                else:
-                                    raw_prediction = probas[0, -1]  # Use last class as bullish
-                                    logger.info(f"🎯 Using last class probability: {raw_prediction}")
+                            logger.info(
+                                f"🎯 Predict proba result: shape={probas.shape if hasattr(probas, 'shape') else 'no shape'}, "
+                                f"values={probas}"
+                            )
                         except Exception as e:
                             logger.warning(f"Predict proba failed: {e}")
-                            raw_prediction = None
                     
                     # Fallback to regular predict
-                    if raw_prediction is None and hasattr(self.ensemble_model, 'predict'):
+                    if probas is None and hasattr(self.ensemble_model, 'predict'):
                         try:
                             pred_result = self.ensemble_model.predict(features)
                             logger.info(f"🎯 Predict result: type={type(pred_result)}, value={pred_result}")
-                            if isinstance(pred_result, np.ndarray):
-                                if pred_result.size > 0:
-                                    # For classification, convert class to probability-like value
-                                    if pred_result.dtype in [np.int32, np.int64]:
-                                        # It's a class label, convert to probability
-                                        # 0 = bearish (0.0), 1 = bullish (1.0)
-                                        raw_prediction = float(pred_result[0])
-                                    else:
-                                        raw_prediction = float(pred_result[0])
+                            if isinstance(pred_result, np.ndarray) and pred_result.size > 0:
+                                if pred_result.dtype in [np.int32, np.int64]:
+                                    raw_prediction = float(pred_result[0]) / max(
+                                        getattr(self.ensemble_model.model, "n_classes_", 5) - 1, 1
+                                    )
                                 else:
-                                    raw_prediction = 0.5
-                            else:
-                                raw_prediction = float(pred_result) if pred_result is not None else 0.5
+                                    raw_prediction = float(pred_result[0])
+                            elif pred_result is not None:
+                                raw_prediction = float(pred_result)
                         except Exception as e:
                             logger.debug(f"Predict failed: {e}")
-                            raw_prediction = 0.5
-                    
-                    if raw_prediction is None:
-                        logger.warning(f"No prediction from model for {symbol}, using neutral")
-                        raw_prediction = 0.5
-                        
-                    # Convert to float safely
-                    try:
-                        prediction = float(raw_prediction)
-                    except (TypeError, ValueError):
-                        logger.warning(f"Could not convert prediction to float: {raw_prediction}")
-                        prediction = 0.5
-                    
-                    logger.info(f"📈 Final prediction value: {prediction:.3f}")
-                    
-                    # For probability-based prediction (0-1 range)
-                    # > 0.5 means bullish, < 0.5 means bearish
-                    signal_strength = abs(prediction - 0.5) * 2  # Convert to strength (0-1)
-                    confidence = min(1.0, signal_strength + 0.2)  # Higher strength = higher confidence
-                    logger.info(f"💪 Signal strength: {signal_strength:.3f}, confidence: {confidence:.3f}")
+
+                    interpreted = self._interpret_model_prediction(probas=probas, raw_prediction=raw_prediction)
+                    if interpreted is None:
+                        logger.info(f"⏸️ No trade signal for {symbol} (hold/neutral)")
+                        continue
+
+                    signal_strength = interpreted["strength"]
+                    confidence = interpreted["confidence"]
+                    logger.info(
+                        f"📈 Signal for {symbol}: {interpreted['signal'].upper()} "
+                        f"(strength={signal_strength:.3f}, confidence={confidence:.3f})"
+                    )
                         
                 except Exception as e:
                     logger.info(f"Prediction failed for {symbol}: {e}")
@@ -832,8 +1020,8 @@ class QuantumSentimentBot:
                 # Create trading signal
                 signal = {
                     'symbol': symbol,
-                    'signal': 'buy' if prediction > 0.5 else 'sell',  # Use raw prediction for direction
-                    'strength': signal_strength,  # Already positive from calculation above
+                    'signal': interpreted['signal'],
+                    'strength': signal_strength,
                     'confidence': confidence,
                     'timestamp': timestamp,
                     'features': features.iloc[0].to_dict() if not features.empty else {},
@@ -910,7 +1098,11 @@ class QuantumSentimentBot:
         logger.info(f"✅ Fetched data for {len(market_data_results)}/{len(universe)} symbols")
         
         # Process each symbol with its data
-        for symbol, bars in market_data_results:
+        for idx, (symbol, bars) in enumerate(market_data_results):
+            if idx % 5 == 0:
+                self._write_dashboard_heartbeat(
+                    note=f"analyzing {idx + 1}/{len(market_data_results)}"
+                )
             try:
                 logger.info(f"🔍 Analyzing {symbol}...")
                 logger.info(f"📊 Got {len(bars)} bars for {symbol}, latest price: ${bars.iloc[-1]['close']:.2f}")
@@ -919,8 +1111,12 @@ class QuantumSentimentBot:
                 try:
                     sentiment_result = await self.sentiment_analyzer.fuse_sentiment(symbol)
                     
-                    # Convert FusedSentiment object to DataFrame format expected by feature pipeline
-                    if sentiment_result:
+                    # Only pass sentiment to features when fusion produced usable data
+                    if (
+                        sentiment_result
+                        and sentiment_result.confidence > 0
+                        and sentiment_result.sources
+                    ):
                         import pandas as pd
                         sentiment_df = pd.DataFrame([{
                             'timestamp': sentiment_result.timestamp,
@@ -929,8 +1125,7 @@ class QuantumSentimentBot:
                             'source': ','.join(sentiment_result.sources)
                         }])
                         sentiment_df.set_index('timestamp', inplace=True)
-                        
-                        # Also keep the raw result for signal generation
+
                         sentiment_dict = {
                             'sentiment_score': sentiment_result.score,
                             'confidence': sentiment_result.confidence,
@@ -964,58 +1159,51 @@ class QuantumSentimentBot:
                 # 4. Get ensemble prediction
                 try:
                     if hasattr(self.ensemble_model, 'is_trained') and self.ensemble_model.is_trained:
-                        # Ensure features are in correct format
-                        if isinstance(features, pd.DataFrame) and len(features) > 0:
-                            raw_prediction = self.ensemble_model.predict(features)
-                            
-                            # For 5-class XGBoost, get probability distribution
-                            if hasattr(self.ensemble_model, 'predict_proba'):
-                                probas = self.ensemble_model.predict_proba(features)
-                                # Use probability-weighted signal strength
-                                if probas.shape[1] == 5:  # 5-class model
-                                    # Classes: 0=Strong Down, 1=Down, 2=Neutral, 3=Up, 4=Strong Up
-                                    weights = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
-                                    signal_strength = float(np.dot(probas[0], weights))
-                                    # Confidence based on max probability
-                                    confidence = float(np.max(probas[0]))
-                                else:
-                                    # Fallback for other probability shapes
-                                    signal_strength = float(raw_prediction[0]) if isinstance(raw_prediction, np.ndarray) else float(raw_prediction)
-                                    confidence = 0.7
-                            else:
-                                # No probability method, use raw prediction
-                                signal_strength = float(raw_prediction[0]) if isinstance(raw_prediction, np.ndarray) else float(raw_prediction)
-                                confidence = 0.7
-                        else:
+                        if not (isinstance(features, pd.DataFrame) and len(features) > 0):
                             logger.warning(f"Invalid features format for {symbol}")
                             continue
+
+                        probas = None
+                        raw_prediction = None
+                        if hasattr(self.ensemble_model, 'predict_proba'):
+                            probas = self.ensemble_model.predict_proba(features)
+                        else:
+                            raw_pred = self.ensemble_model.predict(features)
+                            if isinstance(raw_pred, np.ndarray) and raw_pred.size > 0:
+                                raw_prediction = float(raw_pred[0])
+
+                        interpreted = self._interpret_model_prediction(
+                            probas=probas, raw_prediction=raw_prediction
+                        )
+                        if interpreted is None:
+                            continue
+
+                        prediction = {
+                            'signal_strength': interpreted['strength'] if interpreted['signal'] == 'buy'
+                            else -interpreted['strength'],
+                            'confidence': interpreted['confidence'],
+                            'signal': interpreted['signal'],
+                        }
                     else:
-                        # Model not trained yet, log error and refuse to trade
                         logger.error(f"Model not trained - cannot generate predictions for {symbol}")
                         continue
                         
-                    prediction = {
-                        'signal_strength': signal_strength,
-                        'confidence': confidence
-                    }
+                    signal_strength = prediction.get('signal_strength', 0)
+                    confidence = prediction.get('confidence', 0)
+                    signal_side = prediction.get('signal', 'buy' if signal_strength > 0 else 'sell')
+                    predictions_made += 1
+                
                 except Exception as e:
                     logger.warning("Ensemble prediction failed, using fallback", 
                                  symbol=symbol, error=str(e))
-                    prediction = {
-                        'signal_strength': 0.0,
-                        'confidence': 0.0
-                    }
+                    continue
                 
-                signal_strength = prediction.get('signal_strength', 0)
-                confidence = prediction.get('confidence', 0)
-                predictions_made += 1
-                
-                logger.info(f"🎯 PREDICTION for {symbol}: strength={signal_strength:.3f}, confidence={confidence:.3f}")
+                logger.info(f"🎯 PREDICTION for {symbol}: strength={abs(signal_strength):.3f}, confidence={confidence:.3f}")
                 
                 # 5. Create trading signal with enhanced data
                 signal = {
                     'symbol': symbol,
-                    'signal': 'buy' if signal_strength > 0 else 'sell',
+                    'signal': signal_side,
                     'strength': abs(signal_strength),
                     'confidence': confidence,
                     'timestamp': datetime.now(),
@@ -1159,10 +1347,22 @@ class QuantumSentimentBot:
                     await self._close_position(position, "exit_signal")
                     continue
                 
-                # Log position health
-                logger.debug(f"Position {position.symbol} monitored - Status: OK",
-                           pnl=position.unrealized_pnl,
-                           risk_score=position_risk.get('risk_score', 0))
+                # Log position health (info so TP/SL distance is visible in bot.log)
+                levels = self._position_exit_levels(position)
+                logger.info(
+                    "Position exit check",
+                    symbol=position.symbol,
+                    side="short" if position.is_short else "long",
+                    qty=position.quantity,
+                    entry=levels.get("entry_price", position.average_price),
+                    mark=self._position_market_price(position),
+                    profit_pct=levels.get("profit_pct"),
+                    take_profit_at=levels.get("take_profit_price"),
+                    stop_loss_at=levels.get("stop_loss_price"),
+                    distance_to_tp_pct=levels.get("distance_to_take_profit_pct"),
+                    unrealized_pnl=position.unrealized_pnl,
+                    risk_score=position_risk.get("risk_score", 0),
+                )
                 
             except Exception as e:
                 logger.error("Error monitoring position",
@@ -1191,15 +1391,8 @@ class QuantumSentimentBot:
         """
         
         try:
-            # Simple percentage-based stop loss
-            stop_loss_pct = getattr(self.config.risk, 'stop_loss_pct', 0.05)  # 5% default
-            
-            if position.is_long:
-                loss_pct = (position.average_price - position.current_price) / position.average_price
-            else:
-                loss_pct = (position.current_price - position.average_price) / position.average_price
-            
-            return loss_pct > stop_loss_pct
+            levels = self._position_exit_levels(position)
+            return bool(levels.get("stop_loss_triggered"))
             
         except Exception as e:
             logger.error(f"Error in basic stop loss check: {e}")
@@ -1218,15 +1411,8 @@ class QuantumSentimentBot:
         """
         
         try:
-            # Simple percentage-based take profit
-            take_profit_pct = getattr(self.config.risk, 'take_profit_pct', 0.15)  # 15% default
-            
-            if position.is_long:
-                profit_pct = (position.current_price - position.average_price) / position.average_price
-            else:
-                profit_pct = (position.average_price - position.current_price) / position.average_price
-            
-            return profit_pct > take_profit_pct
+            levels = self._position_exit_levels(position)
+            return bool(levels.get("take_profit_triggered"))
             
         except Exception as e:
             logger.error(f"Error in basic take profit check: {e}")
@@ -1251,10 +1437,11 @@ class QuantumSentimentBot:
             # Check position size relative to portfolio
             account = await self.broker.get_account()
             equity = float(account.equity)
-            position_value = abs(position.quantity * position.current_price)
+            mark = self._position_market_price(position)
+            position_value = abs(position.quantity * mark)
             position_weight = position_value / equity if equity > 0 else 0
             
-            if position_weight > 0.15:  # 15% position limit
+            if position_weight > self.config.trading.max_position_size:
                 risk_factors.append("oversized_position")
                 risk_score += 30
             
@@ -1320,12 +1507,16 @@ class QuantumSentimentBot:
             equity = float(account.equity)
             
             # Calculate portfolio metrics
-            total_exposure = sum(abs(p.quantity * p.current_price) for p in active_positions)
+            total_exposure = sum(
+                abs(p.quantity * self._position_market_price(p)) for p in active_positions
+            )
             leverage = total_exposure / equity if equity > 0 else 0
             
             # Portfolio concentration check
-            position_weights = [(abs(p.quantity * p.current_price) / equity, p.symbol) 
-                              for p in active_positions]
+            position_weights = [
+                (abs(p.quantity * self._position_market_price(p)) / equity, p.symbol)
+                for p in active_positions
+            ]
             max_weight, max_symbol = max(position_weights) if position_weights else (0, "")
             
             # Log portfolio risk summary
@@ -1356,7 +1547,16 @@ class QuantumSentimentBot:
         """Execute order through smart router"""
         
         try:
-            # Use smart router for execution
+            if self.mode == TradingMode.BACKTEST:
+                alpaca_order = await self.broker.submit_order(
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    order_type="market",
+                )
+                return alpaca_order.id if alpaca_order else None
+
+            # Use smart router for live/paper execution
             execution_plan = await self.execution_router.create_execution_plan(
                 order_id=f"sig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 symbol=symbol,
@@ -1463,8 +1663,8 @@ class QuantumSentimentBot:
         
         signal_age = current_time - signal_timestamp
         
-        # More lenient age check for backtesting (signals generated at exact simulation time should pass)
-        max_signal_age = timedelta(hours=1) if self.mode == 'backtest' else timedelta(minutes=10)
+        # More lenient age check for backtesting (hourly bars can span multiple hours within a session)
+        max_signal_age = timedelta(hours=24) if self.mode == 'backtest' else timedelta(minutes=10)
         if signal_age > max_signal_age:
             logger.debug("Signal too old", signal_age=signal_age, max_age=max_signal_age, mode=self.mode)
             return False  # Too old
@@ -1495,7 +1695,8 @@ class QuantumSentimentBot:
             for pos in positions:
                 if not pos.is_flat:
                     # Convert position to weight (normalized by portfolio value)
-                    position_weight = (pos.quantity * pos.current_price) / equity if equity > 0 else 0
+                    mark = self._position_market_price(pos)
+                    position_weight = (pos.quantity * mark) / equity if equity > 0 else 0
                     current_positions[pos.symbol] = position_weight
             
             # Get historical returns data for the symbol
@@ -1605,7 +1806,9 @@ class QuantumSentimentBot:
                 
         except Exception as e:
             logger.error("CRITICAL: Risk system failure", error=str(e))
-            # PRODUCTION RULE: Risk system failure = HALT ALL TRADING
+            if self.mode in (TradingMode.PAPER, TradingMode.SEMI_AUTO):
+                logger.warning("Paper/semi-auto: continuing despite risk system error")
+                return True
             raise RuntimeError(f"Risk system failure - trading halted: {e}")
     
     async def _check_backtest_risk_limits(self) -> bool:
@@ -1680,7 +1883,7 @@ class QuantumSentimentBot:
         try:
             # Get live account and position data
             account = await self.broker.get_account()
-            positions = self.broker.get_all_positions()
+            positions = self.position_tracker.get_all_positions()
             
             equity = float(account.equity)
             buying_power = float(account.buying_power)
@@ -1701,9 +1904,14 @@ class QuantumSentimentBot:
                 logger.warning("RISK WARNING: No buying power available", buying_power=buying_power)
                 return False
             
-            # 4. POSITION LIMITS
-            if len(positions) >= self.config.trading.max_positions:
-                logger.info("Position limit reached", current=len(positions), max=self.config.trading.max_positions)
+            # 4. POSITION LIMITS (non-flat only)
+            active_positions = [p for p in positions if not p.is_flat]
+            if len(active_positions) >= self.config.trading.max_positions:
+                logger.info(
+                    "Position limit reached",
+                    current=len(active_positions),
+                    max=self.config.trading.max_positions,
+                )
                 return False
             
             # 5. DRAWDOWN CHECK using historical high
@@ -1733,7 +1941,8 @@ class QuantumSentimentBot:
             # 7. POSITION SIZE CHECKS
             for position in positions:
                 if not position.is_flat:
-                    position_value = abs(position.quantity * position.current_price)
+                    mark = self._position_market_price(position)
+                    position_value = abs(position.quantity * mark)
                     position_weight = position_value / equity if equity > 0 else 0
                     
                     if position_weight > self.config.trading.max_position_size:
@@ -1772,6 +1981,9 @@ class QuantumSentimentBot:
             
         except Exception as e:
             logger.error("Live risk check failed", error=str(e))
+            if self.mode in (TradingMode.PAPER, TradingMode.SEMI_AUTO):
+                logger.warning("Paper/semi-auto: treating risk check error as pass")
+                return True
             raise RuntimeError(f"Live risk system failure: {e}")
     
     async def _get_returns_data_for_var(self, symbols: List[str]) -> Optional[pd.DataFrame]:
@@ -1812,7 +2024,8 @@ class QuantumSentimentBot:
         
         for position in positions:
             if not position.is_flat:
-                position_value = position.quantity * position.current_price
+                mark = self._position_market_price(position)
+                position_value = position.quantity * mark
                 weight = position_value / equity if equity > 0 else 0
                 weights.append(weight)
             else:
@@ -1899,6 +2112,36 @@ class QuantumSentimentBot:
                    equity=account_status.get('equity'),
                    positions=portfolio_summary.get('active_positions'),
                    total_pnl=portfolio_summary.get('total_pnl'))
+
+        self._write_dashboard_heartbeat(account_status, portfolio_summary)
+
+    def _write_dashboard_heartbeat(
+        self,
+        account_status: Optional[Dict[str, Any]] = None,
+        portfolio_summary: Optional[Dict[str, Any]] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        """Write heartbeat JSON for LAN dashboard."""
+        try:
+            cache_dir = Path(__file__).parent.parent / "cache" / "dashboard"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            if account_status is None and self.account_monitor:
+                account_status = self.account_monitor.get_current_status()
+            if portfolio_summary is None and self.position_tracker:
+                portfolio_summary = self.position_tracker.get_portfolio_summary()
+            payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "mode": self.mode,
+                "equity": (account_status or {}).get("equity"),
+                "positions": (portfolio_summary or {}).get("active_positions", 0),
+                "pending_signals": len(self.pending_signals),
+                "total_pnl": (portfolio_summary or {}).get("total_pnl"),
+                "note": note if note is not None else (account_status or {}).get("note"),
+            }
+            with open(cache_dir / "bot_heartbeat.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logger.debug("Dashboard heartbeat write failed", error=str(e))
     
     async def _get_trading_universe(self) -> List[str]:
         """Get list of symbols to analyze"""
@@ -1912,8 +2155,11 @@ class QuantumSentimentBot:
             if not position.is_flat and position.symbol not in universe:
                 universe.append(position.symbol)
         
-        # Add symbols from dynamic discovery if enabled
-        if self.dynamic_discovery and self.dynamic_discovery.config.enabled:
+        # Add symbols from dynamic discovery if enabled (config + dashboard toggle)
+        from src.feature_flags import is_active
+
+        discovery_on = is_active("dynamic_discovery")
+        if self.dynamic_discovery and self.dynamic_discovery.config.enabled and discovery_on:
             try:
                 # Update discovery system with current universe
                 self.dynamic_discovery.update_universe(set(universe))
@@ -1999,7 +2245,7 @@ class QuantumSentimentBot:
         if not await self._validate_signal(signal):
             return False
         
-        min_signal_strength = config.get('min_signal_strength', 0.6)
+        min_signal_strength = config.get('min_signal_strength', 0.2)
         
         # Check minimum signal strength
         if signal['strength'] < min_signal_strength:
@@ -2157,6 +2403,12 @@ class QuantumSentimentBot:
         # Close database
         if self.db_manager:
             await self.db_manager.close()
+
+        if getattr(self, "unusual_whales_analyzer", None):
+            try:
+                self.unusual_whales_analyzer.cleanup()
+            except Exception as e:
+                logger.debug("Unusual Whales cleanup failed", error=str(e))
         
         logger.info("Trading system shutdown complete")
 
@@ -2193,6 +2445,12 @@ async def main():
     # Override symbols if provided
     if args.symbols:
         bot.config.trading.watchlist = args.symbols
+
+    def request_stop(signum, frame):
+        logger.info("Received stop signal", signal=signum)
+        bot.is_running = False
+
+    signal.signal(signal.SIGTERM, request_stop)
     
     # Run the bot
     await bot.run()

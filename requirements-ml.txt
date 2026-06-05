@@ -34,6 +34,9 @@ cvxpy>=1.4.0  # Convex optimization
 pyportfolioopt>=1.5.0
 quantlib>=1.32  # Quantitative finance
 
+# Feature Engineering & Vision
+opencv-python>=4.8.0  # Chart pattern CNN (cv2)
+
 # Feature Engineering
 featuretools>=1.27.0
 tsfresh>=0.20.0  # Time series features

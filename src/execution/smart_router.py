@@ -1215,7 +1215,7 @@ class SmartOrderRouter:
     def _create_mock_market_data(self, market_conditions: Dict[str, Any]) -> pd.DataFrame:
         """Create mock market data for testing"""
         
-        dates = pd.date_range(start='2024-01-01', periods=100, freq='H')
+        dates = pd.date_range(start='2024-01-01', periods=100, freq='h')
         
         # Generate synthetic OHLCV data
         base_price = 100

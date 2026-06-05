@@ -15,8 +15,8 @@
 git clone <repository-url>
 cd algorithmic-trading-bot
 
-# Create virtual environment
-python -m venv .venv
+# Create virtual environment (Windows: use python.org Python, not MSYS2)
+py -3.11 -m venv .venv   # Windows if MSYS `python` is first on PATH
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 # Automated setup (installs dependencies, creates directories, etc.)
@@ -42,8 +42,8 @@ python backtest.py --start-date 2024-01-01 --end-date 2024-06-30
 git clone <repository-url>
 cd algorithmic-trading-bot
 
-# Create virtual environment
-python -m venv .venv
+# Create virtual environment (Windows: use python.org Python, not MSYS2)
+py -3.11 -m venv .venv   # Windows if MSYS `python` is first on PATH
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 # Install core dependencies
@@ -284,23 +284,56 @@ trading:
   custom_strategy: "my_strategy"
 ```
 
+### LAN Dashboard
+
+Web UI for monitoring and control from any device on your local network (phone, tablet, another PC).
+
+```powershell
+# Windows
+.\scripts\run_dashboard.ps1
+
+# Or directly
+python -m src.api.server
+```
+
+Open on this machine: `http://localhost:8000`
+
+Open from another device on the same Wi‑Fi: `http://<your-pc-ip>:8000` (find IP with `ipconfig` on Windows).
+
+Set a control API key in `.env` (required to start/stop the bot or run backtests from the UI):
+
+```env
+DASHBOARD_API_KEY=choose-a-long-random-string
+```
+
+Enter that key once in the dashboard **Control API key** field (stored in the browser only).
+
+**Windows Firewall:** allow inbound TCP port **8000** on private networks if other devices cannot connect.
+
+**AI Assistant:** Install [Ollama](https://ollama.com), run `ollama pull llama3.2:1b`, then use the **Assistant** tab (model picker shows all pulled models). Optional: `OLLAMA_MODEL` / `OLLAMA_BASE_URL` in `.env`. For Alpaca MCP in Cursor, see the dashboard **Help** tab.
+
 ### API Integration
 
-The system provides REST APIs for monitoring:
+REST endpoints used by the dashboard (also available via curl):
 
 ```bash
-# Start API server
+# Start dashboard server
 python -m src.api.server
 
 # Health check
-curl http://localhost:8000/health
+curl http://localhost:8000/api/health
 
-# Get current positions
+# Overview (account + bot status)
+curl http://localhost:8000/api/overview
+
+# Positions
 curl http://localhost:8000/api/positions
 
-# Get performance metrics
-curl http://localhost:8000/api/metrics
+# Start paper bot (requires X-API-Key header)
+curl -X POST http://localhost:8000/api/bot/start -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" -d "{}"
 ```
+
+Interactive API docs: `http://localhost:8000/docs`
 
 ### Monitoring & Alerts
 
@@ -308,12 +341,6 @@ curl http://localhost:8000/api/metrics
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-```
-
-#### Dashboard Access
-```bash
-# Access web dashboard at:
-http://localhost:8000/dashboard
 ```
 
 ## 🛠️ Troubleshooting
@@ -417,7 +444,8 @@ algorithmic-trading-bot/
 - **`TRAINING_GUIDE.md`**: Detailed model training instructions
 
 ### API Documentation
-- **REST API**: `http://localhost:8000/docs` (when API server running)
+- **Web dashboard**: `http://localhost:8000` (see LAN Dashboard section above)
+- **OpenAPI docs**: `http://localhost:8000/docs` (when dashboard server is running)
 - **Configuration**: See `config/config.yaml` with inline comments
 - **Model Architecture**: See `src/models/` for implementation details
 

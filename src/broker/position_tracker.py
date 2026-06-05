@@ -581,30 +581,58 @@ class PositionTracker:
             return False
     
     async def sync_positions_with_broker(self) -> None:
-        """Synchronize positions with broker"""
+        """Import open positions from the broker into local tracking."""
         if not self.broker:
             logger.warning("No broker configured for position sync")
             return
         
         try:
+            from .alpaca_positions import signed_qty_from_alpaca
+
             broker_positions = await self.broker.get_positions()
-            
-            for broker_pos in broker_positions:
+            seen_symbols: set[str] = set()
+
+            for broker_pos in broker_positions or []:
                 symbol = broker_pos.symbol
-                broker_qty = float(broker_pos.qty)
-                
-                local_position = self.get_position(symbol)
-                local_qty = local_position.quantity if local_position else 0.0
-                
-                # Check for discrepancies
+                broker_qty = signed_qty_from_alpaca(broker_pos)
+                if abs(broker_qty) < 1e-9:
+                    continue
+
+                seen_symbols.add(symbol)
+                avg_price = float(getattr(broker_pos, "avg_entry_price", 0) or 0)
+                unrealized = float(getattr(broker_pos, "unrealized_pl", 0) or 0)
+
+                position = self.get_or_create_position(symbol)
+                local_qty = position.quantity
+
                 if abs(broker_qty - local_qty) > 1e-6:
-                    logger.warning("Position discrepancy detected",
-                                 symbol=symbol,
-                                 broker_qty=broker_qty,
-                                 local_qty=local_qty)
-                    
-                    # Could implement reconciliation logic here
-                    
+                    logger.info(
+                        "Position reconciled from broker",
+                        symbol=symbol,
+                        broker_qty=broker_qty,
+                        local_qty=local_qty,
+                    )
+
+                position.quantity = broker_qty
+                position.average_price = avg_price
+                position.cost_basis = abs(broker_qty * avg_price) if avg_price else position.cost_basis
+                position.unrealized_pnl = unrealized
+                position.last_updated = datetime.now()
+
+                mark = float(getattr(broker_pos, "current_price", 0) or 0)
+                if mark > 0:
+                    self.market_prices[symbol] = mark
+                    self.last_price_update[symbol] = datetime.now()
+
+            for symbol in list(self.positions_by_symbol.keys()):
+                if symbol not in seen_symbols:
+                    pos = self.get_position(symbol)
+                    if pos and not pos.is_flat:
+                        pos.quantity = 0.0
+
+            await self._update_portfolio_metrics()
+            logger.info("Positions synchronized from broker", count=len(seen_symbols))
+
         except Exception as e:
             logger.error("Position sync failed", error=str(e))
     

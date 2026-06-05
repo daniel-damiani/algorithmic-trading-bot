@@ -98,7 +98,7 @@ class SentimentFusion:
             valid_sources = self._validate_sources(sentiment_data)
             
             if len(valid_sources) < self.config.min_sources_required:
-                logger.warning("Insufficient valid sources for fusion",
+                logger.debug("Insufficient valid sources for fusion",
                              symbol=symbol,
                              valid_sources=len(valid_sources),
                              required=self.config.min_sources_required)

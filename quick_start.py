@@ -15,6 +15,10 @@ import subprocess
 import argparse
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+TRAINING_DATA_MASSIVE = PROJECT_ROOT / "data" / "massive" / "massive_training_data.parquet"
+TRAINING_DATA_PRODUCTION = PROJECT_ROOT / "data" / "training" / "production"
+
 def print_header():
     """Print welcome header"""
     print("🚀" + "="*60 + "🚀")
@@ -108,58 +112,95 @@ def run_setup_test():
     """Run setup validation"""
     print("\n🧪 Running setup validation...")
     
+    script = PROJECT_ROOT / "scripts" / "test_setup.py"
     try:
-        result = subprocess.run([sys.executable, "scripts/test_setup.py"], 
-                              capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
         
+        if result.stdout:
+            print(result.stdout.rstrip())
         if result.returncode == 0:
             print("✅ Setup validation passed!")
             return True
-        else:
-            print("❌ Setup validation failed:")
-            print(result.stdout)
-            print(result.stderr)
-            return False
+        print("❌ Setup validation failed:")
+        if result.stderr:
+            print(result.stderr.rstrip())
+        return False
             
     except Exception as e:
         print(f"⚠️  Could not run setup test: {e}")
         return False
 
+def _training_data_available() -> bool:
+    if TRAINING_DATA_MASSIVE.exists():
+        return True
+    if TRAINING_DATA_PRODUCTION.exists() and any(TRAINING_DATA_PRODUCTION.iterdir()):
+        return True
+    return False
+
+
 def train_models(skip_training=False):
     """Train models or check if they exist"""
     print("\n🧠 Checking models...")
     
-    models_dir = Path("models")
+    models_dir = PROJECT_ROOT / "models"
     model_files = list(models_dir.glob("**/*.pkl")) + list(models_dir.glob("**/*.pt"))
     
     if model_files:
         print(f"✅ Found {len(model_files)} existing model files")
         return True
     
+    train_hint = (
+        "   python training/train_simple_massive.py --symbols 10\n"
+        "   # or after downloading production data:\n"
+        "   python train_production.py"
+    )
+
     if skip_training:
         print("⚠️  No models found, but training skipped")
-        print("   You can train later with: python train_production.py --quick-start")
+        print(train_hint)
         return True
-    
-    print("📚 No models found. Training quick-start models...")
-    print("   This will take about 30-60 minutes...")
+
+    if not _training_data_available():
+        print("⚠️  No models found and no training data detected")
+        print("   Download data first, then train:")
+        print("   python scripts/download_quality_data.py --symbols 30")
+        print("   python training/train_simple_massive.py --symbols 10")
+        return True
+
+    print("📚 No models found. Training data is available.")
+    if TRAINING_DATA_MASSIVE.exists():
+        print("   Quick path: training/train_simple_massive.py (~30-60 minutes)")
+    else:
+        print("   Path: training/train_production_model.py")
     
     response = input("   Start training now? (Y/n): ")
     if response.lower() == 'n':
         print("⏭️  Skipping model training")
-        print("   You can train later with: python train_production.py --quick-start")
+        print(train_hint)
         return True
     
     try:
         print("🎯 Starting quick training...")
-        subprocess.run([sys.executable, "train_production.py", "--quick-start", "--symbols", "10"], 
-                      check=True)
+        if TRAINING_DATA_MASSIVE.exists():
+            cmd = [
+                sys.executable,
+                str(PROJECT_ROOT / "training" / "train_simple_massive.py"),
+                "--symbols", "10",
+            ]
+        else:
+            cmd = [sys.executable, str(PROJECT_ROOT / "train_production.py")]
+        subprocess.run(cmd, cwd=PROJECT_ROOT, check=True)
         print("✅ Models trained successfully!")
         return True
         
     except subprocess.CalledProcessError as e:
         print(f"❌ Model training failed: {e}")
-        print("   You can try again later with: python train_production.py --quick-start")
+        print(train_hint)
         return False
 
 def show_next_steps():
@@ -184,7 +225,8 @@ def show_next_steps():
     print("   python src/main.py --mode paper")
     print()
     print("5. 📚 Train better models (optional):")
-    print("   python train_production.py --symbols 30  # 2-4 hours")
+    print("   python training/train_simple_massive.py --symbols 30")
+    print("   python train_production.py  # requires data/training/production")
     print()
     print("📖 For detailed documentation, see README.md")
     print("💡 For troubleshooting, see the README.md troubleshooting section")

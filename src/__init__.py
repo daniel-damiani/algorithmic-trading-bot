@@ -8,9 +8,5 @@ for market prediction and automated trading.
 __version__ = "1.0.0"
 __author__ = "QuantumSentiment Team"
 
-# Core modules
-from . import data
-from . import models
-from . import training
-
+# Avoid eager imports of heavy ML subpackages at `import src` time.
 __all__ = ['data', 'models', 'training']

@@ -48,7 +48,7 @@ trading:
   
   # Position limits - AGGRESSIVE SIZING
   max_positions: 25  # More concurrent positions
-  max_position_size: 0.20  # 20% max per position - AGGRESSIVE
+  max_position_size: 0.10  # 10% max per position
   min_position_size: 0.005  # 0.5% min per position - BIGGER MINIMUM
   
   # Signal thresholds - MORE AGGRESSIVE
@@ -64,7 +64,7 @@ trading:
     adaptive:
       use_available_signals: true    # Use any available signals
       confidence_boost_both: 0.1     # Extra confidence when both technical & sentiment agree
-      min_signal_strength: 0.3       # Minimum signal strength to trade
+      min_signal_strength: 0.2       # Minimum signal strength to trade (5-class models use ~0.25 bull/bear prob)
     
     # Technical analysis only mode
     technical_only:
@@ -230,21 +230,21 @@ features:
     metrics: ["pe_ratio", "market_cap", "volume", "beta"]
     update_frequency: "daily"
 
-# === RISK MANAGEMENT - AGGRESSIVE SETTINGS ===
+# === RISK MANAGEMENT ===
 risk:
-  # Portfolio level limits - HIGH RISK HIGH REWARD
-  max_drawdown: 0.25        # 25% maximum drawdown - AGGRESSIVE
-  daily_loss_limit: 0.08   # 8% daily loss limit - AGGRESSIVE
-  max_leverage: 2.0         # 2x leverage allowed - AGGRESSIVE
+  # Portfolio level limits
+  max_drawdown: 0.10        # 10% maximum drawdown
+  daily_loss_limit: 0.03   # 3% daily loss limit
+  max_leverage: 1.0         # No leverage by default
   
-  # Position level limits - WIDER STOPS
-  stop_loss_pct: 0.05       # 5% stop loss - WIDER
-  take_profit_pct: 0.15     # 15% take profit - BIGGER TARGETS
-  risk_per_trade: 0.03      # 3% risk per trade - AGGRESSIVE
+  # Position level limits - conservative defaults (override via dashboard Risk tab)
+  stop_loss_pct: 0.03       # 3% stop loss
+  take_profit_pct: 0.10      # 10% take profit
+  risk_per_trade: 0.015      # 1.5% risk per trade
   
-  # Correlation limits - ALLOW MORE CONCENTRATION
-  max_correlation: 0.85     # Higher correlation allowed
-  max_sector_concentration: 0.6  # 60% sector concentration allowed
+  # Correlation limits
+  max_correlation: 0.85
+  max_sector_concentration: 0.5
 
 # === PORTFOLIO OPTIMIZATION ===
 portfolio:
@@ -326,6 +326,8 @@ monitoring:
     enabled: true
     host: "0.0.0.0"
     port: 8000
+    refresh_interval_seconds: 5
+    api_key_env: "DASHBOARD_API_KEY"
     
   alerts:
     telegram:

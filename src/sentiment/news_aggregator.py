@@ -126,13 +126,19 @@ class NewsAggregator:
             logger.error("Failed to initialize news aggregator", error=str(e))
             return False
     
-    def analyze_symbol(self, symbol: str, hours_back: Optional[int] = None) -> Dict[str, Any]:
+    def analyze_symbol(
+        self,
+        symbol: str,
+        hours_back: Optional[int] = None,
+        enabled_sources: Optional[set] = None,
+    ) -> Dict[str, Any]:
         """
         Analyze news sentiment for a specific symbol
         
         Args:
             symbol: Stock symbol to analyze
             hours_back: Hours to look back (default from config)
+            enabled_sources: Subset of alpha_vantage, newsapi, rss (default: all configured)
             
         Returns:
             Comprehensive news sentiment analysis
@@ -142,14 +148,14 @@ class NewsAggregator:
         
         hours_back = hours_back or self.config.lookback_hours
         cutoff_time = datetime.utcnow() - timedelta(hours=hours_back)
+        sources = enabled_sources if enabled_sources is not None else {"alpha_vantage", "newsapi", "rss"}
         
         logger.info("Starting news analysis", symbol=symbol, hours_back=hours_back)
         
         try:
-            # Collect news from different sources
-            av_articles = self._get_alpha_vantage_news(symbol, cutoff_time)
-            newsapi_articles = self._get_newsapi_articles(symbol, cutoff_time)
-            rss_articles = self._get_rss_articles(symbol, cutoff_time)
+            av_articles = self._get_alpha_vantage_news(symbol, cutoff_time) if "alpha_vantage" in sources else []
+            newsapi_articles = self._get_newsapi_articles(symbol, cutoff_time) if "newsapi" in sources else []
+            rss_articles = self._get_rss_articles(symbol, cutoff_time) if "rss" in sources else []
             
             # Combine all articles
             all_articles = av_articles + newsapi_articles + rss_articles
